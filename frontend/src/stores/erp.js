@@ -132,7 +132,7 @@ export const useErpStore = defineStore('erp', () => {
   async function loadApplications() {
     try {
       const data = await http.get('/erp/applications')
-      applications.value = data.applications
+      applications.value = Array.isArray(data?.applications) ? data.applications : []
     } catch {}
   }
 
