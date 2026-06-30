@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+server-py/.venv/
+server-py/__pycache__/
+**/__pycache__/
+*.pyc
 
 # Environment variables
 .env
@@ -21,6 +25,8 @@ pnpm-debug.log*
 frontend/chroma/
 server/uploads/*
 !server/uploads/.gitkeep
+server-py/uploads/*
+!server-py/uploads/.gitkeep
 
 # OS files
 .DS_Store
