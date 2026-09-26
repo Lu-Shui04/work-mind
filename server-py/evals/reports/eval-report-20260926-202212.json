@@ -1,0 +1,245 @@
+{
+  "generatedAt": "2026-09-26 20:20:43",
+  "baseUrl": "http://127.0.0.1:3000",
+  "identity": {
+    "tenant_id": "tenant-demo",
+    "user_id": "u-tech-01",
+    "departments": "tech",
+    "clearance": "internal"
+  },
+  "health": "status=healthy uptime=226s",
+  "suites": {
+    "agent_tasks": {
+      "total": 12,
+      "passed": 12,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 7431.0,
+      "p95Ms": 17088.0,
+      "maxMs": 17088.0,
+      "description": "任务 Agent 评测：POST /api/agent/run 读 SSE，比对「实际调用了哪些工具」「路由到哪条分支」「最终回答是否包含要点」。注意最终回答只取 answer_reset 之后的 token（过程说明不算），避免\"过程里提过\"被误判成\"回答里有\"。",
+      "cases": [
+        {
+          "id": "agent-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 4453.0,
+          "guard": "README 记录的坑：纯算式任务如果被塞进知识分支，会检索未命中然后直接结束，工具根本没机会执行 —— 这条防的就是\"工具被知识分支吃掉\"",
+          "detail": "期望：需调用 ['calculate']，回答需含 ['2140']\n实际调用 ['calculate']，route=tool，步数=1，回答（136 字）：**1500 + 800 × 0.8 = 2140**\n\n计算过程（按先乘除后加减的顺序）：\n- 800 × 0.8 = 640\n- 1500 + 640 = **2140**\n\n说明：知识库中没有查到与本问题相关的内容，以上为通用数学计算结果，不涉及任何公司制度或规定。",
+          "metrics": {
+            "tools": [
+              "calculate"
+            ],
+            "route": "tool",
+            "steps": 1,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-002",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 5013.6,
+          "guard": "多项费用求和（1740+1200+450）：防的是模型心算错一个数字却不调用 calculate，或者 calculate 把中文吃进去算出错答案",
+          "detail": "期望：需调用 ['calculate']，回答需含 ['3390']\n实际调用 ['calculate']，route=tool，步数=1，回答（512 字）：## 出差报销金额计算\n\n**明细：**\n\n| 项目 | 单价 | 数量 | 小计 |\n|------|------|------|------|\n| 酒店住宿 | 580 元/晚 | 3 晚 | 1,740 元 |\n| 机票往返 | 1,200 元 | 1 次 | 1,200 元 |\n| 餐费 | 150 元/天 | 3 天 | 450 元 |\n| **合计** | | | **3,390 元** |\n\n**总报销金额：3,390 元**\n\n---\n\n**几点提醒：**\n\n1. **住宿天数**：按 3 晚计算。如果出差 3 天实际只住 2 晚（例如第一天出发、第三天返回），住宿费应为 1,",
+          "metrics": {
+            "tools": [
+              "calculate"
+            ],
+            "route": "tool",
+            "steps": 1,
+            "tokenDuplication": 0.007,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-003",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3494.8,
+          "guard": "纯知识问答应走知识分支（带引用回答），不烧工具步数：防的是路由把\"查制度\"也判成 tool，多花 3~4 倍 token 还答得更差",
+          "detail": "期望：需调用 []，不得调用 ['web_search', 'write_report']，route=knowledge，回答需含 ['司龄', '10天']\n实际调用 []，route=knowledge，步数=0，回答（250 字）：公司年假按员工**司龄**（在本公司连续工作的年限）核定，天数不低于国家法定标准 [1]：\n\n| 司龄 | 年假天数 |\n|------|---------|\n| 满 1 年不满 10 年 | 5 天 |\n| 满 10 年不满 20 年 | 10 天 |\n| 满 20 年及以上 | 15 天 |\n\n司龄满 1 年的员工自满 1 年之日起享受年假 [1]。另外，未休年假最多可结转 5 天 [2]。\n\n**满 10 年工龄**：属于\"满 10 年不满 20 年\"档，年假为 **10 天** [1]。",
+          "metrics": {
+            "tools": [],
+            "route": "knowledge",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-004",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 15116.7,
+          "guard": "多工具协作任务（查文档 + 计算 + 通知）：防的是任务只做一半（只答政策不计算、或算完不发通知）",
+          "detail": "期望：需调用 ['calculate', 'send_notify']，回答需含 ['9天']，回答需含其一 ['年假', '司龄']\n实际调用 ['read_doc', 'calculate', 'get_date', 'write_report', 'send_notify']，route=tool，步数=5，回答（778 字）：已完成。以下是结果汇总：\n\n## 一、公司年假政策（依据《年假与休假政策》HR-2026-007，版本 2026-09）\n\n**年假天数按司龄核定：**\n| 司龄 | 年假天数 |\n|------|---------|\n| 满 1 年不满 10 年 | 5 天 |\n| 满 10 年不满 20 年 | 10 天 |\n| 满 20 年及以上 | 15 天 |\n\n**其他关键规则：**\n- **周期**：以自然年（1/1–12/31）计算，每年 1 月 1 日重置；新员工当年按剩余日历天数折算（向下取整）。\n- **申请**：提前 3 个工作日提交；连续休 5 个工作日及以上需提前 10 个工作日。",
+          "metrics": {
+            "tools": [
+              "read_doc",
+              "calculate",
+              "get_date",
+              "write_report",
+              "send_notify"
+            ],
+            "route": "tool",
+            "steps": 5,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-005",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 6684.1,
+          "guard": "知识 + 计算的组合题（一线城市 600 元/晚 × 4 晚 = 2400）：防的是只复述标准表、不给用户算结果；同时防「明明检索命中却自称没查到」—— 走工具分支时后端会把 miss_notice 误置位，回答以「知识库中没有查到相关内容」开头再自我纠正（用户看到自相矛盾的第一句）",
+          "detail": "期望：需调用 []，回答需含 ['2400']，回答不得出现 ['知识库中没有查到相关内容', '知识库中未找到相关内容']\n实际调用 ['read_doc', 'calculate']，route=tool，步数=2，回答（579 字）：**结论：去北京出差 4 天，酒店住宿费最多可报销 2400 元。**\n\n依据《差旅与报销管理制度》（版本 2026-09）第二章第四条：\n\n| 项目 | 内容 |\n|---|---|\n| 城市级别 | 一线城市（北京、上海、广州、深圳） |\n| 每晚上限 | 600 元 |\n| 出差天数 | 4 天 |\n| 计算 | 600 × 4 = **2400 元** |\n\n**几点需要注意：**\n\n1. **据实报销**：2400 元是上限，不是固定补贴。必须凭增值税发票按实际发生额报销，超出 600 元/晚的部分由个人自理。\n2. **特殊情形可上浮**：若因展会、旺季导致房价普遍超上限，需在出差",
+          "metrics": {
+            "tools": [
+              "read_doc",
+              "calculate"
+            ],
+            "route": "tool",
+            "steps": 2,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-006",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 17088.0,
+          "guard": "需要外部信息的任务必须真联网并产出报告：防的是模型凭记忆编版本号（README 记录过\"没配 key 却假装搜过\"）",
+          "detail": "期望：需调用 ['web_search', 'write_report']，回答需含 ['Vue']\n实际调用 ['web_search', 'web_search', 'web_search', 'write_report']，route=tool，步数=4，回答（935 字）：**知识库中没有查到与本问题相关的内容**（本次未检索公司内部知识库，以下均为公开网络信息）。\n\n## Vue 3 最新稳定版本调研结论\n\n**当前最新稳定版本：Vue 3.5.x 系列**\n\n| 信息项 | 内容 | 来源/时间 |\n|---|---|---|\n| 当前稳定主版本线 | Vue 3.5 | vuejs.org 官方 Releases |\n| 官方页面显示最新稳定版 | **v3.5.31** | vuejs.org/about/releases |\n| 3.5 系列最新小版本（另一来源） | v3.5.42 | vuejs/core 仓库，2026-08-27 |\n| 3.5",
+          "metrics": {
+            "tools": [
+              "web_search",
+              "web_search",
+              "web_search",
+              "write_report"
+            ],
+            "route": "tool",
+            "steps": 4,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-007",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 11501.5,
+          "guard": "日期计算必须走 get_date（按 APP_TIMEZONE 算，不用容器 UTC）：防的是模型自己推算日期，跨时区/跨周末算错",
+          "detail": "期望：需调用 ['get_date']，回答需含 ['工作日']\n实际调用 ['get_date', 'get_date', 'get_date', 'get_date', 'get_date', 'get_date']，route=tool，步数=6，回答（658 字）：**知识库中没有查到与本问题相关的内容**（这是日期计算类问题，不涉及公司内部规定，以下为通用日期计算结果）。\n\n## 结论\n\n- **今天是：2026年9月26日，星期六**（东八区）\n- **从今天算起 45 个工作日之后是：2026年11月28日，星期六**\n\n## 计算说明\n\n| 项目 | 结果 |\n|---|---|\n| 起始日期 | 2026-09-26（周六） |\n| 目标 | 45 个工作日之后 |\n| 对应日历天数 | 63 天 |\n| 目标日期 | **2026-11-28（周六）** |\n\n**推算过程：**\n1. 45 个工作日按每周 5 个工作日折算，约需 45 ÷ ",
+          "metrics": {
+            "tools": [
+              "get_date",
+              "get_date",
+              "get_date",
+              "get_date",
+              "get_date",
+              "get_date"
+            ],
+            "route": "tool",
+            "steps": 6,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-008",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3370.7,
+          "guard": "公司制度类问题必须走知识分支并给出公司口径：防的是模型用\"一般 300-500 元\"的行业常识代替公司标准",
+          "detail": "期望：需调用 []，不得调用 ['web_search']，route=knowledge，回答需含 ['600元']\n实际调用 []，route=knowledge，步数=0，回答（335 字）：公司出差住宿费按出差目的地城市分级，凭增值税发票据实报销，超出标准部分由个人自理 [1]。具体每晚上限如下 [1]：\n\n| 城市级别 | 城市范围 | 每晚上限 |\n|---------|---------|---------|\n| 一线城市 | 北京、上海、广州、深圳 | 600 元 |\n| 二线省会城市 | 杭州、成都、武汉、南京、西安等省会城市及计划单列市 | 450 元 |\n| 其他城市 | 上述范围以外的城市 | 350 元 |\n\n补充规定：\n- 同性别员工同行出差，原则上应合住标准间以节约费用 [1]。\n- 因展会、旺季等原因导致房价普遍超过上限的，须在出差申请中事先说明，经部门负",
+          "metrics": {
+            "tools": [],
+            "route": "knowledge",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-009",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 4018.9,
+          "guard": "【幻觉】知识库里没有年会信息：没查到就必须说没查到，不许编一份年会安排出来（这类\"合理编造\"最伤信任）",
+          "detail": "期望：需调用 []，route=chat，回答需含其一 ['知识库中没有查到相关内容', '知识库中未找到相关内容', '没有查到']\n实际调用 []，route=chat，步数=0，回答（307 字）：（知识库中没有查到相关内容，以下内容来自通用知识，不代表公司口径。）\n\n知识库中没有查到相关内容。\n\n关于公司年会安排和预算，我无法提供贵公司的具体信息，因为这属于公司内部安排，需要以官方通知为准。以下是通用建议：\n\n1. **获取渠道**：可向行政部、人力资源部或你的直属上级咨询，也可留意公司内部公告、OA系统或企业微信群通知。\n2. **常见内容**：年会通知一般会包含时间、地点、参与范围、主题、着装要求、节目征集及报名方式等。\n3. **预算信息**：年会预算通常由行政部门或财务部门掌握，普通员工一般无法直接查询，如需了解可走内部申请流程。\n\n如果你能提供公司名称或相关内部文件，我可以帮",
+          "metrics": {
+            "tools": [],
+            "route": "chat",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-010",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3136.0,
+          "guard": "【幻觉 + 权限】《考勤与加班管理规定》是 hr 部门文档，tech 身份看不到 —— 必须如实说没查到，不能凭常识答\"每月 3 次\"",
+          "detail": "期望：需调用 []，回答需含其一 ['知识库中没有查到相关内容', '知识库中未找到相关内容', '没有查到']\n实际调用 []，route=chat，步数=0，回答（187 字）：（知识库中没有查到相关内容，以下内容来自通用知识，不代表公司口径。）\n\n知识库中没有查到相关内容。\n\n关于补卡次数，这属于各公司自行制定的考勤管理规定，没有统一标准，我无法提供贵公司的具体数字。建议您通过以下途径确认：\n\n- 查阅员工手册或考勤管理制度\n- 咨询人力资源部门或您的直属主管\n- 查看公司OA/考勤系统内的相关说明\n\n如果您能提供公司制度原文，我可以帮您解读。",
+          "metrics": {
+            "tools": [],
+            "route": "chat",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-011",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 9437.2,
+          "guard": "通知类任务必须走 send_notify（演示环境返回值里带 simulated: true）：防的是模型只在回答里\"假装发出去了\"",
+          "detail": "期望：需调用 ['send_notify']\n实际调用 ['get_date', 'send_notify']，route=tool，步数=2，回答（529 字）：通知已生成并发送（演示环境，仅生成内容，未真实投递到飞书）。\n\n**通知内容如下：**\n\n> **【会议通知】技术部周会 — 9月27日（周日）上午10:00**\n>\n> 技术部各位同事：\n>\n> 定于明天（2026年9月27日，星期日）上午10:00 召开技术部周会，请准时参加。\n>\n> - 会议时间：2026-09-27（周日）10:00\n> - 参会人员：技术部全体\n> - 会议形式/地点：待确认（请补充线上会议链接或会议室）\n>\n> 请提前准备本周工作进展与待办事项。\n>\n> 备注：明天为周日，如会议时间需调整，请及时回复确认。\n\n**两点需要你确认：**\n\n1. **日期提醒**：今",
+          "metrics": {
+            "tools": [
+              "get_date",
+              "send_notify"
+            ],
+            "route": "tool",
+            "steps": 2,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-012",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 5857.5,
+          "guard": "【流式输出完整性】防的是 Agent 把同一个 token 连发两遍 —— 用户看到的是\"公公司司年年假假\"这种叠字（2026-09-26 实测相邻重复 token 占比 ≈0.5，而对话流为 0）",
+          "detail": "期望：需调用 []，回答需含 ['结转']\n实际调用 []，route=knowledge，步数=0，回答（146 字）：可以。当年未休完的年假最多可结转 5 天至次年，且必须在次年 3 月 31 日前休完，逾期自动作废 [1]。超过 5 天的未休年假不结转、不折算工资 [1]。此外，因公司原因（如项目攻坚、连续出差）导致无法休假的，经部门负责人提报、人力资源总监批准后，可延长至次年 6 月 30 日 [1]。",
+          "metrics": {
+            "tools": [],
+            "route": "knowledge",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        }
+      ],
+      "wallMs": 89172.8
+    }
+  },
+  "summary": {
+    "total": 12,
+    "passed": 12,
+    "failed": 0,
+    "infraFailed": 0,
+    "passRate": 1.0,
+    "avgMs": 7431.0,
+    "p95Ms": 17088.0,
+    "maxMs": 17088.0
+  }
+}

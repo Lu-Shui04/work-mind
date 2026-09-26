@@ -1,0 +1,630 @@
+{
+  "generatedAt": "2026-09-26 19:51:34",
+  "baseUrl": "http://127.0.0.1:3000",
+  "identity": {
+    "tenant_id": "tenant-demo",
+    "user_id": "u-tech-01",
+    "departments": "tech",
+    "clearance": "internal"
+  },
+  "health": "status=healthy uptime=818s",
+  "suites": {
+    "rag_retrieval": {
+      "total": 19,
+      "passed": 17,
+      "failed": 2,
+      "passRate": 0.8947,
+      "avgMs": 1705.8,
+      "p95Ms": 6046.1,
+      "maxMs": 6046.1,
+      "description": "RAG 检索召回评测：用真实问题打 POST /api/knowledge/search，判定「期望文档是否出现在 TopK」以及「命中切片的正文里是否真的有这条结论」；另含权限过滤与检索范围收窄用例。统计 Recall@k 与命中率。",
+      "cases": [
+        {
+          "id": "rag-001",
+          "passed": true,
+          "elapsedMs": 2149.7,
+          "guard": "年假天数是最常被问的制度问题：防的是意图判对了、检索却召回不到《年假与休假政策》（历史坑：相似度阈值写死 0.5 导致语义相关问题整片召不回）",
+          "detail": "期望：TopK 内需命中 ['年假与休假政策']（≥1 份），正文需含 ['司龄']\n实际：命中 6 条：['年假与休假政策', '年假与休假政策', '年假与休假政策', '年假与休假政策', 'WorkMind 员工手册', '年假与休假政策']；reason=ok bestScore=0.6389",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 6,
+            "bestScore": 0.6389,
+            "reason": "ok",
+            "top_titles": [
+              "年假与休假政策",
+              "年假与休假政策",
+              "年假与休假政策"
+            ]
+          }
+        },
+        {
+          "id": "rag-002",
+          "passed": true,
+          "elapsedMs": 871.1,
+          "guard": "防的是只召回文档开头（年假天数表）、把后半段的结转条款漏掉 —— 只比文档标题会漏判，所以必须同时校验切片正文里的关键结论",
+          "detail": "期望：TopK 内需命中 ['年假与休假政策']（≥1 份），正文需含 ['3 月 31 日']\n实际：命中 2 条：['年假与休假政策', 'WorkMind 员工手册']；reason=ok bestScore=0.636",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.636,
+            "reason": "ok",
+            "top_titles": [
+              "年假与休假政策",
+              "WorkMind 员工手册"
+            ]
+          }
+        },
+        {
+          "id": "rag-003",
+          "passed": true,
+          "elapsedMs": 747.5,
+          "guard": "差旅住宿标准同时存在 600 / 450 / 350 三档：防的是召回到了文档却取错档位的切片（回答成 450 元）",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['600 元']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.6831",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6831,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-004",
+          "passed": true,
+          "elapsedMs": 898.8,
+          "guard": "餐费补贴在同一份文档的第三章：防的是「只召回第二章住宿费」这种同一文档内部召回不全",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['150 元']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.6349",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6349,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-005",
+          "passed": true,
+          "elapsedMs": 823.6,
+          "guard": "防的是把「单日上限 120 元」和「餐补 150 元」串台 —— 两条结论挨在同一章里，取错就是答错",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['120 元']\n实际：命中 2 条：['差旅与报销管理制度', '差旅与报销管理制度']；reason=ok bestScore=0.5985",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.5985,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度",
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-006",
+          "passed": true,
+          "elapsedMs": 879.7,
+          "guard": "防的是「30 个自然日」被答成「30 个工作日」（制度里这两种口径是分开写的）",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['30 个自然日']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.6272",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6272,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-007",
+          "passed": true,
+          "elapsedMs": 887.6,
+          "guard": "审批权限是三行表格：防的是表格型内容解析后召回不全，导致答不出 20000 元这一档",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['总经理']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.5776",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.5776,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-008",
+          "passed": true,
+          "elapsedMs": 1027.0,
+          "guard": "员工手册是 general 制度（任何身份都该看得到）：防的是权限过滤把 general 文档误挡掉",
+          "detail": "期望：TopK 内需命中 ['WorkMind 员工手册']（≥1 份），正文需含 ['3 个月']\n实际：命中 1 条：['WorkMind 员工手册']；reason=ok bestScore=0.5811",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.5811,
+            "reason": "ok",
+            "top_titles": [
+              "WorkMind 员工手册"
+            ]
+          }
+        },
+        {
+          "id": "rag-009",
+          "passed": true,
+          "elapsedMs": 796.8,
+          "guard": "口语化提问（说「发工资」而不是「发薪日」）：防的是检索只认书面词、换个说法就召不回",
+          "detail": "期望：TopK 内需命中 ['WorkMind 员工手册']（≥1 份），正文需含 ['每月 10 日']\n实际：命中 1 条：['WorkMind 员工手册']；reason=ok bestScore=0.4479",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.4479,
+            "reason": "ok",
+            "top_titles": [
+              "WorkMind 员工手册"
+            ]
+          }
+        },
+        {
+          "id": "rag-010",
+          "passed": true,
+          "elapsedMs": 967.1,
+          "guard": "部门专属文档（tech / internal）：防的是 tech 身份看不到自己的部门规范 —— 部门过滤写反就会这样",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份），正文需含 ['每周三', '14:00']\n实际：命中 1 条：['前端研发规范']；reason=ok bestScore=0.6205",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6205,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范"
+            ]
+          }
+        },
+        {
+          "id": "rag-011",
+          "passed": true,
+          "elapsedMs": 852.0,
+          "guard": "中英混排的技术问题（chunk / JS）：防的是 embedding 对中英混排提问的召回退化",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份），正文需含 ['500 KB']\n实际：命中 1 条：['前端研发规范']；reason=ok bestScore=0.5551",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.5551,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范"
+            ]
+          }
+        },
+        {
+          "id": "rag-012",
+          "passed": true,
+          "elapsedMs": 1020.2,
+          "guard": "防的是「技术栈约定」这一节被其它章节（代码质量 / 发布流程）挤掉 TopK",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份），正文需含 ['Vue 3']\n实际：命中 2 条：['前端研发规范', '把项目讲得像自己真做过的面试表达']；reason=ok bestScore=0.6296",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.6296,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范",
+              "把项目讲得像自己真做过的面试表达"
+            ]
+          }
+        },
+        {
+          "id": "rag-013",
+          "passed": true,
+          "elapsedMs": 1016.2,
+          "guard": "【权限】《考勤与加班管理规定》是 hr / internal，tech 身份不该看到。防的是权限过滤被放宽或写反，把别的部门的文档召回来",
+          "detail": "期望：不要求命中任何文档，且不得出现 ['考勤与加班管理规定']\n实际：命中 0 条：[]；reason=rerank_rejected bestScore=0.4399",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 0,
+            "bestScore": 0.4399,
+            "reason": "rerank_rejected",
+            "top_titles": []
+          }
+        },
+        {
+          "id": "rag-014",
+          "passed": false,
+          "elapsedMs": 6046.1,
+          "guard": "【权限】合同规范是 legal / confidential，tech 身份连标题都不该看到 —— 这是后果最严重的越权回归",
+          "detail": "请求失败：请求失败：<urlopen error [Errno 111] Connection refused>",
+          "metrics": {},
+          "error": "请求失败：<urlopen error [Errno 111] Connection refused>"
+        },
+        {
+          "id": "rag-015",
+          "passed": false,
+          "elapsedMs": 6010.0,
+          "guard": "【权限】财务办法是 finance / internal，tech 身份不可见。防的是「部门过滤只对聊天生效、检索验证接口漏过滤」",
+          "detail": "请求失败：请求失败：[Errno 104] Connection reset by peer",
+          "metrics": {},
+          "error": "请求失败：[Errno 104] Connection reset by peer"
+        },
+        {
+          "id": "rag-016",
+          "passed": true,
+          "elapsedMs": 4711.8,
+          "guard": "【范围收窄】显式选部门 = general 就是硬过滤：防的是 knowledgeDepartment 被忽略，用户以为收窄了、其实全库都在查",
+          "detail": "期望：不要求命中任何文档，且不得出现 ['前端研发规范']\n实际：命中 0 条：[]；reason=rerank_rejected bestScore=0.3973",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 0,
+            "bestScore": 0.3973,
+            "reason": "rerank_rejected",
+            "top_titles": []
+          }
+        },
+        {
+          "id": "rag-017",
+          "passed": true,
+          "elapsedMs": 951.8,
+          "guard": "【范围收窄】docType = spec 应只查规范类文档：防的是按文档类型收窄失效（参数接了却没进 SQL 的 WHERE）",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份）\n实际：命中 1 条：['前端研发规范']；reason=ok bestScore=0.6205",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6205,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范"
+            ]
+          }
+        },
+        {
+          "id": "rag-018",
+          "passed": true,
+          "elapsedMs": 897.3,
+          "guard": "【范围收窄】docType = policy 应只命中制度规定：同时校验「该命中的命中、不该出现的没出现」，避免收窄被写成「一条都不返回」",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），且不得出现 ['前端研发规范']\n实际：命中 2 条：['差旅与报销管理制度', '差旅与报销管理制度']；reason=ok bestScore=0.6512",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.6512,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度",
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-019",
+          "passed": true,
+          "elapsedMs": 855.5,
+          "guard": "public 密级文档对匿名 / 任意身份都可见：防的是权限过滤连 public 也挡住（过度收紧），这两篇面试资料是给访客看的",
+          "detail": "期望：TopK 内需命中 ['AI产品经理面试高频30题']（≥1 份），正文需含 ['面试']\n实际：命中 6 条：['【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲']；reason=ok bestScore=0.622",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 6,
+            "bestScore": 0.622,
+            "reason": "ok",
+            "top_titles": [
+              "【配套手册】AI产品经理面试高频30题精讲",
+              "【配套手册】AI产品经理面试高频30题精讲",
+              "【配套手册】AI产品经理面试高频30题精讲"
+            ]
+          }
+        }
+      ],
+      "wallMs": 32412.8
+    },
+    "intent": {
+      "total": 15,
+      "passed": 15,
+      "failed": 0,
+      "passRate": 1.0,
+      "avgMs": 24.6,
+      "p95Ms": 80.6,
+      "maxMs": 80.6,
+      "description": "意图判定评测：POST /api/chat/stream 读 SSE 的 intent 事件，比对 needKnowledge 是否符合预期。防两类回归 ——「该查库却不查」和「闲聊也去查库」。默认策略是召回优先（RAG_INTENT_MODE=recall_first）：只有打招呼/客套话/自我介绍/闲聊创作/翻译润色/写作生成/日期天气/纯算式才跳过检索。",
+      "cases": [
+        {
+          "id": "intent-001",
+          "passed": true,
+          "elapsedMs": 21.5,
+          "guard": "打招呼必须跳过检索：防的是\"召回优先\"被写成\"一律检索\"，寒暄也白花一次 embedding + 检索",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-打招呼，ruleHit=[]，reason=识别为「打招呼」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-打招呼"
+          }
+        },
+        {
+          "id": "intent-002",
+          "passed": true,
+          "elapsedMs": 73.9,
+          "guard": "客套话同样是零信息量输入：防的是把客套话当成可检索内容去查库",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-客套话，ruleHit=[]，reason=识别为「客套话」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-客套话"
+          }
+        },
+        {
+          "id": "intent-003",
+          "passed": true,
+          "elapsedMs": 13.7,
+          "guard": "问助手本身与公司资料无关：防的是这类问题被检索结果带偏成\"未命中内容\"的答复",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-询问助手本身，ruleHit=[]，reason=识别为「询问助手本身」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-询问助手本身"
+          }
+        },
+        {
+          "id": "intent-004",
+          "passed": true,
+          "elapsedMs": 18.9,
+          "guard": "闲聊创作类：防的是知识优先策略把创作请求也拦成\"知识库中未找到相关内容\"",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-闲聊创作，ruleHit=[]，reason=识别为「闲聊创作」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-闲聊创作"
+          }
+        },
+        {
+          "id": "intent-005",
+          "passed": true,
+          "elapsedMs": 18.8,
+          "guard": "纯语言任务不需要公司资料：防的是翻译请求被塞进检索分支",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-纯语言任务，ruleHit=[]，reason=识别为「纯语言任务」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-纯语言任务"
+          }
+        },
+        {
+          "id": "intent-006",
+          "passed": true,
+          "elapsedMs": 20.1,
+          "guard": "写作生成类任务要的是\"写\"不是\"查\"：这条是历史踩坑点 —— 被检索分支接住后会因为没命中而拒答，用户拿不到邮件",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-写作/生成类任务，ruleHit=['入职']，reason=识别为「写作/生成类任务」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-写作/生成类任务"
+          }
+        },
+        {
+          "id": "intent-007",
+          "passed": true,
+          "elapsedMs": 15.7,
+          "guard": "日期类问题没有可检索内容：防的是\"今天几号\"被知识优先策略拒答（用户要的是日期，不是公司制度）",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-询问日期时间，ruleHit=[]，reason=识别为「询问日期时间」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-询问日期时间"
+          }
+        },
+        {
+          "id": "intent-008",
+          "passed": true,
+          "elapsedMs": 16.8,
+          "guard": "纯算式跳过检索：防的是算术题也去查库，既慢又会因为没命中而多一段\"未查到\"话术",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-纯算式，ruleHit=[]，reason=识别为「纯算式」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-纯算式"
+          }
+        },
+        {
+          "id": "intent-009",
+          "passed": true,
+          "elapsedMs": 80.6,
+          "guard": "天气问的是外部信息，与公司知识库无关：防的是天气问题走检索分支",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-询问天气，ruleHit=[]，reason=识别为「询问天气」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-询问天气"
+          }
+        },
+        {
+          "id": "intent-010",
+          "passed": true,
+          "elapsedMs": 16.8,
+          "guard": "最典型的该查库问题：防的是\"该查却不查\"，用户以为助手看了公司制度其实没看",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['年假']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：hr",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-011",
+          "passed": true,
+          "elapsedMs": 18.9,
+          "guard": "制度类提问必须查库：防的是规则判定被收紧（旧 strict 模式就因为没命中关键词而跳过检索）",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['报销', '出差', '标准']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：finance",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-012",
+          "passed": true,
+          "elapsedMs": 17.6,
+          "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=[]，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-013",
+          "passed": true,
+          "elapsedMs": 12.5,
+          "guard": "部门专属知识（前端研发规范）：防的是\"没有制度类关键词就不查库\"，导致部门规范永远检索不到",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['代码', '上线']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：tech",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-014",
+          "passed": true,
+          "elapsedMs": 13.0,
+          "guard": "口语化制度问题：防的是判定依赖书面词（\"报销时限\"）而不是语义",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['报销']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：finance",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-015",
+          "passed": true,
+          "elapsedMs": 9.7,
+          "guard": "短问句同样要查库：防的是\"消息太短就不检索\"这类误伤（长度阈值只能拦 1 个字的消息）",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['试用期']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：hr",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        }
+      ],
+      "wallMs": 370.2
+    },
+    "erp_parse": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "passRate": 1.0,
+      "avgMs": 1221.5,
+      "p95Ms": 1829.3,
+      "maxMs": 1829.3,
+      "description": "ERP 智能填单评测：POST /api/erp/parse 把自然语言解析成结构化表单，逐字段比对类型 / 总金额 / 日期 / 自然日与工作日 / 明细条数 / 合规告警。金额一律用文本里的算术期望值精确比对（±0.01），只用绝对日期出题，避免评测随时间漂移。",
+      "cases": [
+        {
+          "id": "erp-001",
+          "passed": true,
+          "elapsedMs": 1829.3,
+          "guard": "四项明细求和（1740+1200+450+260）：防的是漏项或者把\"每天\"乘以错误天数（餐费按 3 天算）",
+          "detail": "期望：{\"type\": \"travel\", \"totalAmount\": 3650, \"itemsMin\": 4, \"itemNamesAny\": [\"住宿\"]}\n实际：{\"type\": \"travel\", \"totalAmount\": 3650.0, \"reason\": \"上海出差3天费用报销\", \"dept\": null, \"warnings\": [\"住宿费合计1740元（580元/晚×3晚），单笔未超3000元，但请确认是否符合部门住宿标准\", \"出差具体日期未明确，暂按上周（2026-09-21 至 2026-09-23）填写，请核实\", \"报销事由较简略，建议补充出差事由（如客户拜访、会议名称等）\", \"餐费与打车费为估算合计，建议提供发票明细\"]}；items=[{\"name\": \"住宿费\", \"amount\": 1740.0}, {\"name\": \"机票往返\", \"amount\": 1200.0}, {\"name\": \"餐费\", \"amount\": 450.0}, {\"name\": \"打车费\", \"amount\": 260.0}]",
+          "metrics": {
+            "type": "travel",
+            "totalAmount": 3650.0
+          }
+        },
+        {
+          "id": "erp-002",
+          "passed": true,
+          "elapsedMs": 1064.3,
+          "guard": "一句话里两个并列明细：防的是只解析出第一项（总金额跟着少一半）",
+          "detail": "期望：{\"type\": \"office\", \"totalAmount\": 997, \"itemsMin\": 2, \"itemNamesAny\": [\"支架\", \"键鼠\"]}\n实际：{\"type\": \"office\", \"totalAmount\": 997.0, \"reason\": \"购买办公用品（显示器支架、键鼠）\", \"dept\": null, \"warnings\": [\"未提供购买日期，请补充具体发生日期\", \"未提供报销部门，请补充\"]}；items=[{\"name\": \"显示器支架\", \"amount\": 398.0}, {\"name\": \"键鼠套装\", \"amount\": 599.0}]",
+          "metrics": {
+            "type": "office",
+            "totalAmount": 997.0
+          }
+        },
+        {
+          "id": "erp-003",
+          "passed": true,
+          "elapsedMs": 1125.2,
+          "guard": "餐饮单笔限额 500 元由服务端 check_compliance 判定：防的是\"模型解析对了但合规告警没接上\"，用户提交时看不到超限提示",
+          "detail": "期望：{\"type\": \"meal\", \"totalAmount\": 860, \"warningsAny\": [\"500\"]}\n实际：{\"type\": \"meal\", \"totalAmount\": 860.0, \"reason\": \"团队聚餐餐饮费\", \"dept\": null, \"warnings\": [\"报销事由较笼统，建议补充聚餐事由（如项目庆功、团队建设等）\", \"未提供报销部门，请补充\", \"\\\"团队聚餐\\\" ¥860.0 超过单笔限额 ¥500，需要额外说明\"]}；items=[{\"name\": \"团队聚餐\", \"amount\": 860.0}]",
+          "metrics": {
+            "type": "meal",
+            "totalAmount": 860.0
+          }
+        },
+        {
+          "id": "erp-004",
+          "passed": true,
+          "elapsedMs": 944.8,
+          "guard": "费用类型分类（培训而不是\"其他\"）：类型选错会走错审批链，金额也会按错限额校验",
+          "detail": "期望：{\"type\": \"training\", \"totalAmount\": 5100, \"itemsMin\": 2}\n实际：{\"type\": \"training\", \"totalAmount\": 5100.0, \"reason\": \"参加AI培训课程费用报销\", \"dept\": null, \"warnings\": [\"报名费4800元超过单笔3000元限额，需提供审批或说明\", \"未提供费用发生日期，请补充具体日期\", \"未提供报销部门，请补充\"]}；items=[{\"name\": \"AI培训课程报名费\", \"amount\": 4800.0}, {\"name\": \"教材费\", \"amount\": 300.0}]",
+          "metrics": {
+            "type": "training",
+            "totalAmount": 5100.0
+          }
+        },
+        {
+          "id": "erp-005",
+          "passed": true,
+          "elapsedMs": 1358.1,
+          "guard": "住宿 900 元/晚超过公司 800 元标准：防的是超标提醒丢失（员工以为能全额报销，到财务被退回）",
+          "detail": "期望：{\"type\": \"travel\", \"totalAmount\": 5380, \"warningsAny\": [\"住宿费用偏高\"]}\n实际：{\"type\": \"travel\", \"totalAmount\": 5380.0, \"reason\": \"深圳出差4天差旅费报销\", \"dept\": null, \"warnings\": [\"住宿费合计3600元（900元/晚×4晚），单笔超过3000元，请确认是否符合住宿标准或需附审批说明\", \"未提供具体出差日期，请补充起止日期以便核对\", \"未提供报销部门，请补充\", \"住宿费用偏高，每晚标准为 ¥800\"]}；items=[{\"name\": \"住宿费\", \"amount\": 3600.0}, {\"name\": \"机票（往返）\", \"amount\": 1500.0}, {\"name\": \"市内交通\", \"amount\": 280.0}]",
+          "metrics": {
+            "type": "travel",
+            "totalAmount": 5380.0
+          }
+        },
+        {
+          "id": "erp-006",
+          "passed": true,
+          "elapsedMs": 1218.5,
+          "guard": "病假必须提示需要医院证明：防的是材料要求丢失，员工事后补材料",
+          "detail": "期望：{\"type\": \"sick\", \"startDate\": \"2026-03-10\", \"endDate\": \"2026-03-10\", \"days\": 1, \"workdays\": 1, \"warningsAny\": [\"医院证明\"]}\n实际：{\"type\": \"sick\", \"startDate\": \"2026-03-10\", \"endDate\": \"2026-03-10\", \"days\": 1.0, \"workdays\": 1, \"reason\": \"感冒发烧，去医院看病\", \"emergencyContact\": null, \"warnings\": [\"病假需提供医院证明\"]}；items=[]",
+          "metrics": {
+            "type": "sick",
+            "totalAmount": null
+          }
+        },
+        {
+          "id": "erp-007",
+          "passed": true,
+          "elapsedMs": 781.7,
+          "guard": "跨周末的假期：自然日 4 天、工作日只有 2 天（3/13 周五、3/16 周一）。防的是 workdays 直接等于 days，扣错工资",
+          "detail": "期望：{\"type\": \"personal\", \"startDate\": \"2026-03-13\", \"endDate\": \"2026-03-16\", \"days\": 4, \"workdays\": 2}\n实际：{\"type\": \"personal\", \"startDate\": \"2026-03-13\", \"endDate\": \"2026-03-16\", \"days\": 4.0, \"workdays\": 2, \"reason\": \"去外地办事\", \"emergencyContact\": null, \"warnings\": []}；items=[]",
+          "metrics": {
+            "type": "personal",
+            "totalAmount": null
+          }
+        },
+        {
+          "id": "erp-008",
+          "passed": true,
+          "elapsedMs": 1365.2,
+          "guard": "婚假 10 天含法定 3 天，且要提示证明材料：防的是类型判成\"年假\"，用错假期额度",
+          "detail": "期望：{\"type\": \"marriage\", \"startDate\": \"2026-05-01\", \"endDate\": \"2026-05-10\", \"days\": 10, \"workdays\": 6, \"warningsAny\": [\"证明\", \"审批\"]}\n实际：{\"type\": \"marriage\", \"startDate\": \"2026-05-01\", \"endDate\": \"2026-05-10\", \"days\": 10.0, \"workdays\": 6, \"reason\": \"领证结婚\", \"emergencyContact\": null, \"warnings\": [\"请假超过3个工作日，需要主管和HR双重审批\", \"婚假需提供相关证明材料（如结婚证）\"]}；items=[]",
+          "metrics": {
+            "type": "marriage",
+            "totalAmount": null
+          }
+        },
+        {
+          "id": "erp-009",
+          "passed": true,
+          "elapsedMs": 1348.1,
+          "guard": "调休（compensatory）与事假（personal）容易混淆：类型判错会走错审批权限、也会算错调休额度",
+          "detail": "期望：{\"type\": \"compensatory\", \"startDate\": \"2026-03-18\", \"endDate\": \"2026-03-18\", \"days\": 1, \"workdays\": 1}\n实际：{\"type\": \"compensatory\", \"startDate\": \"2026-03-18\", \"endDate\": \"2026-03-18\", \"days\": 1.0, \"workdays\": 1, \"reason\": \"上个周末加班两天，申请调休一天\", \"emergencyContact\": null, \"warnings\": []}；items=[]",
+          "metrics": {
+            "type": "compensatory",
+            "totalAmount": null
+          }
+        },
+        {
+          "id": "erp-010",
+          "passed": true,
+          "elapsedMs": 1180.0,
+          "guard": "全工作日的年假：防的是工作日天数被多加（把前后周末算进来），导致年假余额被多扣",
+          "detail": "期望：{\"type\": \"annual\", \"startDate\": \"2026-04-01\", \"endDate\": \"2026-04-03\", \"days\": 3, \"workdays\": 3}\n实际：{\"type\": \"annual\", \"startDate\": \"2026-04-01\", \"endDate\": \"2026-04-03\", \"days\": 3.0, \"workdays\": 3, \"reason\": \"带家人出去旅游\", \"emergencyContact\": null, \"warnings\": []}；items=[]",
+          "metrics": {
+            "type": "annual",
+            "totalAmount": null
+          }
+        }
+      ],
+      "wallMs": 12216.2
+    }
+  },
+  "summary": {
+    "total": 44,
+    "passed": 42,
+    "failed": 2,
+    "passRate": 0.9545,
+    "avgMs": 1022.6,
+    "p95Ms": 4711.8,
+    "maxMs": 6046.1
+  }
+}

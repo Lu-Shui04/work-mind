@@ -1,0 +1,144 @@
+{
+  "suite": "erp_parse",
+  "description": "ERP 智能填单评测：POST /api/erp/parse 把自然语言解析成结构化表单，逐字段比对类型 / 总金额 / 日期 / 自然日与工作日 / 明细条数 / 合规告警。金额一律用文本里的算术期望值精确比对（±0.01），只用绝对日期出题，避免评测随时间漂移。",
+  "cases": [
+    {
+      "id": "erp-001",
+      "formType": "expense",
+      "text": "我上周去上海出差3天，酒店每晚580元，机票往返1200元，餐费每天150元，打车花了260元",
+      "expect": {
+        "type": "travel",
+        "totalAmount": 3650,
+        "itemsMin": 4,
+        "itemNamesAny": [
+          "住宿"
+        ]
+      },
+      "guard": "四项明细求和（1740+1200+450+260）：防的是漏项或者把\"每天\"乘以错误天数（餐费按 3 天算）"
+    },
+    {
+      "id": "erp-002",
+      "formType": "expense",
+      "text": "买了一个显示器支架398元和一套键鼠599元，办公用品报销",
+      "expect": {
+        "type": "office",
+        "totalAmount": 997,
+        "itemsMin": 2,
+        "itemNamesAny": [
+          "支架",
+          "键鼠"
+        ]
+      },
+      "guard": "一句话里两个并列明细：防的是只解析出第一项（总金额跟着少一半）"
+    },
+    {
+      "id": "erp-003",
+      "formType": "expense",
+      "text": "上周五团队聚餐花了860元，一共6个人，帮我报销餐饮费",
+      "expect": {
+        "type": "meal",
+        "totalAmount": 860,
+        "warningsAny": [
+          "500"
+        ]
+      },
+      "guard": "餐饮单笔限额 500 元由服务端 check_compliance 判定：防的是\"模型解析对了但合规告警没接上\"，用户提交时看不到超限提示"
+    },
+    {
+      "id": "erp-004",
+      "formType": "expense",
+      "text": "参加AI培训课程，报名费4800元，教材费300元，帮我报销",
+      "expect": {
+        "type": "training",
+        "totalAmount": 5100,
+        "itemsMin": 2
+      },
+      "guard": "费用类型分类（培训而不是\"其他\"）：类型选错会走错审批链，金额也会按错限额校验"
+    },
+    {
+      "id": "erp-005",
+      "formType": "expense",
+      "text": "去深圳出差4天，酒店每晚900元，机票往返1500元，市内交通280元",
+      "expect": {
+        "type": "travel",
+        "totalAmount": 5380,
+        "warningsAny": [
+          "住宿费用偏高"
+        ]
+      },
+      "guard": "住宿 900 元/晚超过公司 800 元标准：防的是超标提醒丢失（员工以为能全额报销，到财务被退回）"
+    },
+    {
+      "id": "erp-006",
+      "formType": "leave",
+      "text": "我感冒发烧，2026年3月10日请一天病假去医院看病",
+      "expect": {
+        "type": "sick",
+        "startDate": "2026-03-10",
+        "endDate": "2026-03-10",
+        "days": 1,
+        "workdays": 1,
+        "warningsAny": [
+          "医院证明"
+        ]
+      },
+      "guard": "病假必须提示需要医院证明：防的是材料要求丢失，员工事后补材料"
+    },
+    {
+      "id": "erp-007",
+      "formType": "leave",
+      "text": "从2026年3月13日到2026年3月16日请事假，共4天，要去外地办事",
+      "expect": {
+        "type": "personal",
+        "startDate": "2026-03-13",
+        "endDate": "2026-03-16",
+        "days": 4,
+        "workdays": 2
+      },
+      "guard": "跨周末的假期：自然日 4 天、工作日只有 2 天（3/13 周五、3/16 周一）。防的是 workdays 直接等于 days，扣错工资"
+    },
+    {
+      "id": "erp-008",
+      "formType": "leave",
+      "text": "计划2026年5月1日到2026年5月10日请婚假，去领证结婚",
+      "expect": {
+        "type": "marriage",
+        "startDate": "2026-05-01",
+        "endDate": "2026-05-10",
+        "days": 10,
+        "workdays": 6,
+        "warningsAny": [
+          "证明",
+          "审批"
+        ]
+      },
+      "guard": "婚假 10 天含法定 3 天，且要提示证明材料：防的是类型判成\"年假\"，用错假期额度"
+    },
+    {
+      "id": "erp-009",
+      "formType": "leave",
+      "text": "上个周末加班两天，想申请2026年3月18日调休一天",
+      "expect": {
+        "type": "compensatory",
+        "startDate": "2026-03-18",
+        "endDate": "2026-03-18",
+        "days": 1,
+        "workdays": 1
+      },
+      "guard": "调休（compensatory）与事假（personal）容易混淆：类型判错会走错审批权限、也会算错调休额度"
+    },
+    {
+      "id": "erp-010",
+      "formType": "leave",
+      "text": "2026年4月1日到2026年4月3日请年假，带家人出去旅游",
+      "expect": {
+        "type": "annual",
+        "startDate": "2026-04-01",
+        "endDate": "2026-04-03",
+        "days": 3,
+        "workdays": 3
+      },
+      "guard": "全工作日的年假：防的是工作日天数被多加（把前后周末算进来），导致年假余额被多扣"
+    }
+  ]
+}
