@@ -31,7 +31,8 @@ from app.services.identity import User, get_current_user, reset_current_user, se
 from app.services.model import create_chat_model
 from app.services.rag.intent import classify_intent
 from app.services.rag.query import (
-    SearchFilters, build_context, no_knowledge_reply, retrieve_with_meta,
+    MISS_FIRST_RULE, SearchFilters, build_context, miss_notice as miss_notice_text,
+    no_knowledge_reply, retrieve_with_meta,
 )
 from app.utils.logger import logger
 
@@ -102,6 +103,9 @@ KNOWLEDGE_SYSTEM = """你是 WorkMind AI 知识库助手。
 class AgentState(TypedDict):
     task: str
     route: str
+    # 知识库查过但没查到时的开场白（""=不需要说明）：
+    # 用户要求"库里没有的内容必须先说明"，这个字段一路带到回答节点，见 miss_notice_text()
+    miss_notice: str
     messages: Annotated[list, add_messages]
     steps: int
     sources: list
@@ -192,9 +196,14 @@ async def knowledge_answer(state: AgentState):
 
 # ── 分支二：直接回答 ──────────────────────────────────────────────────
 async def direct_answer(state: AgentState):
+    # 知识库查过但没查到：提示词要求模型第一句先说明（见 MISS_FIRST_RULE）。
+    # 不在这里往 content 里拼说明 —— 前端看的是**流式 token**，拼在最终消息上不会出现在流里，
+    # 那句说明由路由层作为第一个 token 发出去（见 run_agent 的 kb_missed 分支）。
+    miss = (state.get("miss_notice") or "").strip()
+    system = _system_with_memory(CHAT_SYSTEM + (("\n\n" + MISS_FIRST_RULE) if miss else ""), state)
     full = ""
     async for chunk in _agent_model.astream([
-        SystemMessage(content=_system_with_memory(CHAT_SYSTEM, state)),
+        SystemMessage(content=system),
         HumanMessage(content=state["task"]),
     ]):
         full += chunk.content or ""
@@ -227,8 +236,10 @@ def _system_with_memory(base: str, state: AgentState) -> str:
 
 
 async def _agent_node(state: AgentState):
+    # 走工具分支也可能是因为"知识库没查到"：这种情况下最终回答同样要先说明（见 direct_answer）
+    base = AGENT_SYSTEM + ("\n\n" + MISS_FIRST_RULE if (state.get("miss_notice") or "").strip() else "")
     response = await _model_with_tools.ainvoke(
-        [_system_with_memory(AGENT_SYSTEM, state), HumanMessage(content=state["task"]),
+        [_system_with_memory(base, state), HumanMessage(content=state["task"]),
          *state["messages"]]
     )
     return {"messages": [response], "steps": state.get("steps", 0) + 1}
@@ -505,10 +516,25 @@ async def run_agent(task: str, on_event, user: User | None = None,
             "ruleHit": intent.rule_hit,
         })
 
+        # 查了库但没查到（且不是"强制"分支，强制分支会直接回固定答复）：
+        # 把开场白带进图，保证最终回答第一句就是"知识库中没有查到相关内容"
+        kb_missed = bool(need) and not pre_sources and not forced_miss
+        miss_text = miss_notice_text() if kb_missed else ""
+
+        # 【库里没有 → 回答必须先说明】route=chat（直接回答）时，由后端把这句话作为
+        # **第一个 token** 发出去：模型再怎么发挥，用户看到的第一句也是它。
+        # 为什么不放在 direct_answer 里拼字符串：前端渲染的是流式 token，拼在最终消息上
+        # 不会进流。工具分支（route=tool）的最终回答交给提示词规则，不在这里抢答 ——
+        # 那一路可能出现"过程说明被 answer_reset 挪走"，硬塞一句反而会被挪到过程区。
         final_content = ""
+        if kb_missed and route == "chat":
+            final_content = miss_text
+            await on_event("token", {"token": miss_text})
+
         async for event in agent_graph.astream_events(
             {"task": task, "route": route, "messages": [], "steps": 0,
              "sources": pre_sources, "recall": pre_recall,
+             "miss_notice": miss_text,
              # 入口已经检索过一次（命中或"强制模式下没命中"），知识分支直接用结果，
              # 别再花一次 embedding + 重排的钱
              "prefetched": route == "knowledge" and bool(need),

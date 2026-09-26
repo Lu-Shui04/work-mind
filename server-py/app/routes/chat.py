@@ -18,8 +18,8 @@ from app.services.identity import User, current_user
 from app.services.model import chat_model
 from app.services.rag.intent import classify_intent
 from app.services.rag.query import (
-    SearchFilters, build_context, no_knowledge_reply, resolve_knowledge_mode,
-    retrieve_with_meta,
+    MISS_FIRST_RULE, SearchFilters, build_context, miss_notice as miss_notice_text,
+    no_knowledge_reply, resolve_knowledge_mode, retrieve_with_meta,
 )
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
@@ -183,11 +183,14 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             # 也保证它不会被误读成"公司资料"。
             miss_notice = ""
             if resolve_knowledge_mode(body.useKnowledge, need, sources) == "fallback_miss":
-                explain = (recall or {}).get("explain") or "没有可用内容"
-                miss_notice = (f"（知识库未命中：{explain}。以下回答来自通用知识，不代表公司口径。）"
-                               "\n\n")
-                base_system += ("\n\n注意：本轮问题在企业知识库中**没有查到相关资料**，"
-                                "请用通用知识回答，不要编造公司制度、数字或出处。")
+                # 【库里没有 → 必须先说明】两道保险，缺一不可：
+                #   1) 后端先把这句话发出去（模型再怎么发挥，用户看到的第一句也是它）
+                #   2) 提示词要求模型自己第一句也说一遍（这样读起来才像"回答的一部分"，
+                #      而不是一句系统旁注）
+                # 检索诊断（候选数/最高分/阈值）不再塞进回答正文：那个位置已经有黄色的
+                # "未命中原因"提示框在展示了，正文里出现"阈值没标定"这类工程细节只会干扰阅读。
+                miss_notice = miss_notice_text()
+                base_system += "\n\n" + MISS_FIRST_RULE
 
             context_block = ""
             if sources:
