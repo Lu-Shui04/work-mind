@@ -13,9 +13,14 @@ from app.services.model import create_chat_model
 from app.utils.logger import logger
 
 # 工作流用 temperature=0.7，输出更自然
-_model = create_chat_model(temperature=0.7)
+#
+# ⚠️ 必须开 streaming：节点里用的是 chain.ainvoke()，只有**模型本身**开了流式，
+#    astream_events 才会发出 on_chat_model_stream 事件。
+#    以前这两个模型是 streaming=False，路由里转发 token 的代码就是死代码 ——
+#    用户看到的现象是"转半天，最后整段文字一次性蹦出来"（实测周报生成就是这样）。
+_model = create_chat_model(temperature=0.7, streaming=True)
 # 代码/结构化输出用 temperature=0，更确定
-_model0 = create_chat_model(temperature=0)
+_model0 = create_chat_model(temperature=0, streaming=True)
 _parser = StrOutputParser()
 
 # 每个工作流实例都有 checkpointer，支持暂停/恢复
@@ -372,6 +377,9 @@ WORKFLOW_META = {
             {"id": "human_review", "label": "人工审核", "isHuman": True},
             {"id": "generate_report", "label": "生成周报"},
         ],
+        # 哪个节点产出最终结果：路由只把它的 token 当"正文"往下推，
+        # 其它节点的 token 贴在左侧流程图对应的卡片上（这样流程走到哪一步能实时看见）
+        "resultNode": "generate_report",
         "resultKey": "report",
     },
     "meeting_minutes": {
@@ -389,6 +397,9 @@ WORKFLOW_META = {
             {"id": "human_review", "label": "人工审核", "isHuman": True},
             {"id": "generate_minutes", "label": "生成纪要"},
         ],
+        # 哪个节点产出最终结果：路由只把它的 token 当"正文"往下推，
+        # 其它节点的 token 贴在左侧流程图对应的卡片上（这样流程走到哪一步能实时看见）
+        "resultNode": "generate_minutes",
         "resultKey": "minutes",
     },
     "email_polish": {
@@ -405,6 +416,9 @@ WORKFLOW_META = {
             {"id": "human_review", "label": "人工审核", "isHuman": True},
             {"id": "polish_email", "label": "生成润色版本"},
         ],
+        # 哪个节点产出最终结果：路由只把它的 token 当"正文"往下推，
+        # 其它节点的 token 贴在左侧流程图对应的卡片上（这样流程走到哪一步能实时看见）
+        "resultNode": "polish_email",
         "resultKey": "polished",
     },
     "prd_skeleton": {
@@ -420,6 +434,9 @@ WORKFLOW_META = {
             {"id": "human_review", "label": "人工审核", "isHuman": True},
             {"id": "generate_prd", "label": "生成 PRD"},
         ],
+        # 哪个节点产出最终结果：路由只把它的 token 当"正文"往下推，
+        # 其它节点的 token 贴在左侧流程图对应的卡片上（这样流程走到哪一步能实时看见）
+        "resultNode": "generate_prd",
         "resultKey": "prd",
     },
 }

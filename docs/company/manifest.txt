@@ -1,0 +1,17 @@
+# 公司制度文档清单（供 scripts/seed-knowledge-base.sh 灌库使用）
+# 列顺序：文件名|文档标题|部门|文档类型|密级|版本|生效日期|责任人|标签
+# 部门：general(全员通用) / hr / tech / finance / legal / product / sales
+# 类型：policy(制度) / manual(手册) / spec(规范) / report / contract / other
+# 密级：public(公开) / internal(内部) / confidential(机密)
+#
+# 说明：公司级制度（差旅报销、年假、员工手册）用 department=general + internal，
+#       所有身份都能看到（Agent 示例任务「费用计算」「知识查询」依赖它们）；
+#       部门专属文档保留部门限制，用来演示权限过滤。
+01-员工手册.md|WorkMind 员工手册|general|manual|internal|2026-09|2026-01-01|人力资源部|制度,手册,入职,福利
+02-差旅与报销管理制度.md|差旅与报销管理制度|general|policy|internal|2026-09|2026-01-01|财务部|差旅,报销,费用,住宿标准,餐补
+03-年假与休假政策.md|年假与休假政策|general|policy|internal|2026-09|2026-01-01|人力资源部|年假,休假,请假,调休,病假
+04-考勤与加班管理规定.md|考勤与加班管理规定|hr|policy|internal|2026-09|2026-01-01|人力资源部|考勤,加班,调休,打卡
+05-前端研发规范.md|前端研发规范|tech|spec|internal|2026-09|2026-03-01|技术研发部|前端,规范,代码评审,发布
+06-财务付款与预算管理办法.md|财务付款与预算管理办法|finance|policy|internal|2026-09|2026-01-01|财务部|付款,预算,发票,账期
+07-合同评审与保密管理规范.md|合同评审与保密管理规范|legal|policy|confidential|2026-09|2026-01-01|法务合规部|合同,评审,用章,保密
+08-产品需求与PRD规范.md|产品需求与PRD规范|product|spec|internal|2026-09|2026-03-01|产品设计部|PRD,需求评审,埋点

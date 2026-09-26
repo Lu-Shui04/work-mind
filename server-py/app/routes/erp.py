@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.middleware import rate_limiter
-from app.routes.monitor import record_api_call
 from app.services.erp.approval import (
     APPROVAL_ROLES, plan_approval_flow, plan_reasons, review_application,
 )
@@ -222,7 +221,8 @@ async def parse(body: dict):
             form["warnings"] = [*(form.get("warnings") or []), *compliance_alerts]
         else:
             form = await parse_leave_form(text)
-        record_api_call(feature="erp", input_tokens=0, output_tokens=0)
+        # 用量由 parse_expense_form / parse_leave_form 内部按真实 token 记账
+        # （这里原来记的是 0/0：调用次数对、费用永远是 ¥0）
         return {"success": True, "form": form, "formType": form_type}
     except Exception as err:
         logger.error("erp: parse error", {"error": str(err)})
@@ -286,7 +286,8 @@ async def submit_stream(body: dict):
             yield "paused", {"appId": app_id, "stepId": application["pendingStepId"],
                              "application": application}
         else:
-            record_api_call(feature="erp", latency_ms=round((time.time() - started) * 1000))
+            # 用量已由每个审批节点（review_application）按真实 token 记账，
+            # 这里不再补一条"只有延迟、没有 token"的记录，避免同一次审批记两遍
             yield "done", {"appId": app_id, "status": application["status"]}
 
     return sse_stream(generator)
@@ -339,7 +340,8 @@ async def resume_stream(app_id: str, body: dict):
             yield "paused", {"appId": app_id, "stepId": application["pendingStepId"],
                              "application": application}
         else:
-            record_api_call(feature="erp", latency_ms=round((time.time() - started) * 1000))
+            # 用量已由每个审批节点（review_application）按真实 token 记账，
+            # 这里不再补一条"只有延迟、没有 token"的记录，避免同一次审批记两遍
             yield "done", {"appId": app_id, "status": application["status"]}
 
     return sse_stream(generator)

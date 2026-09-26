@@ -107,6 +107,9 @@ async def on_startup():
     # 连接 PostgreSQL + pgvector 并建表（幂等）。失败不阻止启动，
     # 但知识库接口会明确报"数据库未连接"，不会静默返回空结果。
     await init_db()
+    # 日预算存在 app_settings 里，启动时读回来（否则重建容器后悄悄变回默认值）
+    from app.routes.monitor import load_budget
+    await load_budget()
     logger.info("server started", {"port": config.app.port, "env": config.app.env})
     print("\n🚀 WorkMind Server (FastAPI) 已启动")
     print(f"   地址: http://localhost:{config.app.port}")

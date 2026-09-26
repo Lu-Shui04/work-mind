@@ -19,6 +19,7 @@ PostgreSQL + pgvector 连接池与建表 —— 知识库的唯一持久化层�
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import date, datetime
 
@@ -133,6 +134,85 @@ CREATE TABLE IF NOT EXISTS chunks (
     "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS heading_path TEXT[] NOT NULL DEFAULT '{}'",
     "CREATE INDEX IF NOT EXISTS idx_chunks_doc    ON chunks (doc_id, order_index)",
     "CREATE INDEX IF NOT EXISTS idx_chunks_tenant ON chunks (tenant_id)",
+
+    # ── 会话记忆 ────────────────────────────────────────────────
+    # 和知识库同样的理由：以前会话/记忆/画像都放在进程内的 dict 里，
+    # **后端一重启（改一行代码、docker compose up --build、机器重启）就全没了**，
+    # 用户上一句刚说过的名字、刚算过的数，下一句就不记得了，而且没有任何提示。
+    # 现在三张表落库，重启后照旧记得。
+    #
+    # 主键用 (tenant_id, session_id) 复合键：session_id 是前端生成的，
+    # 只用它做主键的话，别的租户猜到一个 id 就能读到别人的对话内容。
+    """
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    tenant_id  TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    user_id    TEXT NOT NULL DEFAULT 'anonymous',
+    summary    TEXT NOT NULL DEFAULT '',
+    summary_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, session_id)
+)
+""",
+    """
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id         BIGSERIAL PRIMARY KEY,
+    tenant_id  TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (tenant_id, session_id)
+        REFERENCES chat_sessions (tenant_id, session_id) ON DELETE CASCADE
+)
+""",
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages (tenant_id, session_id, id)",
+    """
+CREATE TABLE IF NOT EXISTS user_profiles (
+    tenant_id  TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    profile    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, user_id)
+)
+""",
+
+    # ── 用量统计（费用看板）─────────────────────────────────────
+    # 和知识库/会话记忆同样的理由，只是这次踩得更狠：用量统计原来是 monitor.py
+    # 里的一个进程内 dict，而 server 容器**没有挂载源码**，改任何一行后端代码
+    # 都要 docker compose up -d --build server —— 一重建内存清零，
+    # 看板上刚跑出来数字就没了，看起来就像"看板跟系统不通、点了也没反应"。
+    # 现在每次模型调用写一行，看板从库里聚合；重启/重建都不丢。
+    """
+CREATE TABLE IF NOT EXISTS usage_calls (
+    id            BIGSERIAL PRIMARY KEY,
+    ts            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    feature       TEXT NOT NULL,
+    tenant_id     TEXT NOT NULL DEFAULT '',
+    user_id       TEXT NOT NULL DEFAULT '',
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    latency_ms    INTEGER NOT NULL DEFAULT 0,
+    cost_cny      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    from_cache    BOOLEAN NOT NULL DEFAULT FALSE,
+    saved_tokens  INTEGER NOT NULL DEFAULT 0,
+    estimated     BOOLEAN NOT NULL DEFAULT FALSE
+)
+""",
+    "CREATE INDEX IF NOT EXISTS idx_usage_calls_ts      ON usage_calls (ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_calls_feature ON usage_calls (feature, ts DESC)",
+
+    # ── 运行期设置（键值）───────────────────────────────────────
+    # 目前只存看板的日预算：以前预算也在进程内，重建后悄悄变回 ¥50，
+    # 用户改过的预算"保存成功但下次打开又回去了"。
+    """
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+""",
 )
 
 
@@ -275,3 +355,40 @@ def date_str(value) -> str | None:
 
 def ts_str(value) -> str:
     return value.isoformat() if isinstance(value, datetime) else (str(value) if value else "")
+
+
+# ── 运行期设置（app_settings 键值表）──────────────────────────────
+# 目前只有看板的日预算用它。读写在 SQL 层做成 upsert，调用方不关心
+# "第一次写"还是"覆盖写"，避免出现"改了预算下次打开又变回默认值"。
+async def get_setting(key: str, default=None):
+    pool = get_pool()
+    if pool is None:
+        return default
+    try:
+        async with pool.acquire() as conn:
+            value = await conn.fetchval("SELECT value FROM app_settings WHERE key = $1", key)
+        return default if value is None else json.loads(value)
+    except Exception as err:  # noqa: BLE001 - 设置读不到不该让接口 500
+        logger.warn("db: 读取设置失败", {"key": key, "error": str(err)})
+        return default
+
+
+async def set_setting(key: str, value) -> bool:
+    pool = get_pool()
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO app_settings (key, value, updated_at)
+                VALUES ($1, $2::jsonb, now())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = now()
+                """,
+                key, json.dumps(value),
+            )
+        return True
+    except Exception as err:  # noqa: BLE001
+        logger.warn("db: 写入设置失败", {"key": key, "error": str(err)})
+        return False

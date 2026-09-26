@@ -19,10 +19,12 @@ import time
 from datetime import datetime, timezone
 from typing import Literal
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
 from app.services.model import create_chat_model
 from app.utils.logger import logger
+from app.utils.tokens import sum_usage
 
 _review_model = create_chat_model(temperature=0)
 
@@ -131,6 +133,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_review_usage(handler: UsageMetadataCallbackHandler, started: float) -> dict:
+    """把这一次审批节点的模型用量记到看板（feature=erp）。"""
+    from app.routes.monitor import record_api_call
+
+    input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    record_api_call(feature="erp", input_tokens=input_tokens, output_tokens=output_tokens,
+                    latency_ms=round((time.time() - started) * 1000))
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens}
+
+
 async def review_application(role_id: str, form_data: dict, form_type: str,
                              prior_messages: list[dict], applicant_answers: list[dict],
                              force_decision: bool = False) -> dict:
@@ -163,16 +175,20 @@ async def review_application(role_id: str, form_data: dict, form_type: str,
         f"已有上下文：\n" + ("\n".join(context_lines) if context_lines else "（无）")
     )
 
+    # 用量记账：with_structured_output 返回的是解析后的对象，**拿不到 usage**，
+    # 所以挂一个回调处理器收集真实 token —— 以前这里记的是 0，看板上 ERP 永远是 ¥0。
+    handler = UsageMetadataCallbackHandler()
     started = time.time()
     result: ReviewDecision = await _review_model.with_structured_output(
         ReviewDecision, method="function_calling"
-    ).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+    ).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}],
+              config={"callbacks": [handler]})
 
-    usage = getattr(result, "usage_metadata", None)  # 结构化输出不返回 usage，token 走响应对象不可得
     data = result.model_dump()
     if data["decision"] == "need_info" and not data["questions"]:
         data["questions"] = [data["reason"]]
     data["durationMs"] = round((time.time() - started) * 1000)
+    data["usage"] = _record_review_usage(handler, started)
     data["roleId"] = role_id
     data["formView"] = view
     logger.info("erp: review done", {

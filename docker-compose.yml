@@ -9,7 +9,9 @@
 # 现在切片与文档都在 PostgreSQL 里，向量检索由 pgvector 负责，重启不丢。
 
 services:
-  # ── 知识库数据库（PostgreSQL 17 + pgvector）─────────────────────
+  # ── 应用数据库（PostgreSQL 17 + pgvector）──────────────────────
+  # 存两样东西：知识库（documents/chunks + 向量）和会话记忆
+  # （chat_sessions/chat_messages/user_profiles）—— 都跨重启保留。─
   db:
     image: pgvector/pgvector:pg17
     container_name: workmind-db
@@ -52,7 +54,13 @@ services:
       - RAG_SIMILARITY_THRESHOLD=${RAG_SIMILARITY_THRESHOLD:-0.35}
       - RAG_TOP_K=${RAG_TOP_K:-6}
       # 检索不到内容时：grounded=明确说没找到（不拿模型自身知识兜底）/ fallback=照常回答
-      - RAG_ANSWER_POLICY=${RAG_ANSWER_POLICY:-grounded}
+      # 自动模式下"库里没有"怎么办：fallback=先说明未命中、再用通用知识回答（默认）；
+      # grounded=只回"没找到"（想在"自动"下也严格就改成 grounded）
+      # 注意：「强制」不看这个开关，永远是只依据知识库作答
+      - RAG_ANSWER_POLICY=${RAG_ANSWER_POLICY:-fallback}
+      # 会话记忆：超过 N 轮异步做摘要，每次带「摘要 + 最近 K 轮」
+      - MEMORY_SUMMARY_AFTER_ROUNDS=${MEMORY_SUMMARY_AFTER_ROUNDS:-10}
+      - MEMORY_KEEP_ROUNDS=${MEMORY_KEEP_ROUNDS:-10}
       # 意图识别策略：recall_first（默认，默认就查库）/ strict（旧的严格模式）
       - RAG_INTENT_MODE=${RAG_INTENT_MODE:-recall_first}
       # 重排：llm=用 DEEPSEEK_API_KEY 打分（默认）/ bge=专用 rerank 接口 / none=关闭
@@ -63,6 +71,19 @@ services:
       - RERANK_POOL_MULT=${RERANK_POOL_MULT:-3}
       - RERANK_MAX_CANDIDATES=${RERANK_MAX_CANDIDATES:-12}
       - RERANK_MAX_CHARS=${RERANK_MAX_CHARS:-600}
+      # 重排分数下限：低于它的候选直接丢弃，防止"主题沾边"的假命中把 Agent 锁死在知识分支
+      - RAG_RERANK_MIN_SCORE=${RAG_RERANK_MIN_SCORE:-}
+      # 联网搜索：不配 key 就是 demo 模式（只返回演示数据，并如实告知模型未接入真实搜索）
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - BOCHA_API_KEY=${BOCHA_API_KEY:-}
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-auto}
+      - SEARCH_MAX_RESULTS=${SEARCH_MAX_RESULTS:-5}
+      # 智谱 Web Search：复用上面那个 ZHIPU_API_KEY（没额外配 key 也能真实联网）
+      - ZHIPU_SEARCH_ENGINE=${ZHIPU_SEARCH_ENGINE:-search_std}
+      # 工具循环最大步数（实测标定：默认 14；用尽会强制收尾，不会中途停在过程说明上）
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-14}
+      # 日期工具按这个时区算"今天"（容器默认 UTC，会比北京时间差一天）
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
     volumes:
       - ./server-py/uploads:/app/uploads   # 上传文件持久化
     depends_on:

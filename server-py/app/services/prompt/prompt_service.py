@@ -5,9 +5,11 @@ import time
 from datetime import datetime, timezone
 from typing import Literal
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
 from app.services.model import create_chat_model
+from app.utils.tokens import sum_usage
 
 # 评分模型用 temperature=0，结果稳定
 _score_model = create_chat_model(temperature=0)
@@ -120,18 +122,26 @@ class _Comparison(BaseModel):
     reason: str = Field(description="对比理由，30字以内")
 
 
-async def score_ab_test(question: str, answer_a: str, answer_b: str) -> dict:
+async def score_ab_test(question: str, answer_a: str, answer_b: str,
+                     usage_out: dict | None = None) -> dict:
+    """AI 评分（3 次模型调用：A/B 各评一次 + 一次对比）。
+
+    usage_out：可选，回填这 3 次调用的真实 token（看板要按真实费用记账；
+    以前 A/B 测试记的是 0/0，看板上"Prompt 调试"的调用次数对、费用永远是 ¥0）。
+    """
+    handler = UsageMetadataCallbackHandler()
+    config = {"callbacks": [handler]}
     eval_model = _score_model.with_structured_output(_Evaluation, method="function_calling")
 
     eval_a, eval_b = await asyncio.gather(
         eval_model.ainvoke([
             {"role": "system", "content": "你是 AI 回答质量评估专家，客观评分，不偏袒任何一方。"},
             {"role": "user", "content": f"问题：{question}\n\n回答：{answer_a}"},
-        ]),
+        ], config=config),
         eval_model.ainvoke([
             {"role": "system", "content": "你是 AI 回答质量评估专家，客观评分，不偏袒任何一方。"},
             {"role": "user", "content": f"问题：{question}\n\n回答：{answer_b}"},
-        ]),
+        ], config=config),
     )
 
     compare_model = _score_model.with_structured_output(_Comparison, method="function_calling")
@@ -147,7 +157,11 @@ A的评分：相关性{eval_a.relevance} 准确性{eval_a.accuracy} 清晰度{ev
 B的评分：相关性{eval_b.relevance} 准确性{eval_b.accuracy} 清晰度{eval_b.clarity} 简洁性{eval_b.conciseness} 综合{eval_b.overall}
 
 哪个回答更好？"""},
-    ])
+    ], config=config)
+
+    if usage_out is not None:
+        input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+        usage_out.update({"input_tokens": input_tokens, "output_tokens": output_tokens})
 
     return {
         "scoreA": eval_a.model_dump(),

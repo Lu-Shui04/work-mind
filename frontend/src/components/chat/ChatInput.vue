@@ -45,11 +45,11 @@
       <span class="kb-switch">
         <span class="kb-label">知识库</span>
         <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'auto' }"
-                @click="chatStore.knowledgeMode = 'auto'" title="自动：默认检索，只有闲聊/纯算式才跳过">自动</button>
+                @click="chatStore.knowledgeMode = 'auto'" title="自动：默认检索；查到就用资料回答（带引用），查不到会说明并用通用知识回答">自动</button>
         <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'force' }"
-                @click="chatStore.knowledgeMode = 'force'" title="强制检索：这次一定要查知识库">强制</button>
+                @click="chatStore.knowledgeMode = 'force'" title="强制：只依据知识库回答，查不到就说查不到，不用通用知识补充">强制</button>
         <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'off' }"
-                @click="chatStore.knowledgeMode = 'off'" title="关闭：这次不查知识库">关闭</button>
+                @click="chatStore.knowledgeMode = 'off'" title="关闭：不查知识库，直接用模型通用知识回答">关闭</button>
       </span>
     </div>
   </div>

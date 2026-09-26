@@ -74,13 +74,14 @@
     </div>
 
     <!-- A/B 对比 -->
-    <div v-if="activeTab === 'ab'" class="tab-panel ab-panel">
+    <div v-if="activeTab === 'ab'" class="tab-panel ab-panel" ref="abPanelEl">
       <div class="ab-question">
         <label class="field-label">测试问题（A 和 B 共用同一个问题）</label>
         <div class="question-row">
           <textarea v-model="ps.abConfig.question" class="input" placeholder="输入测试问题..." rows="2" />
           <button class="btn btn-primary" @click="ps.runAbTest()" :disabled="!ps.abConfig.question.trim() || ps.abTesting">
-            <template v-if="ps.abTesting">测试中...</template>
+            <template v-if="ps.abScoring">评分中...</template>
+            <template v-else-if="ps.abTesting">生成中...</template>
             <template v-else><el-icon><CaretRight /></el-icon> 开始对比</template>
           </button>
         </div>
@@ -91,7 +92,7 @@
           <textarea v-model="ps.abConfig.systemPromptA" class="input ab-input" placeholder="System Prompt A..." rows="5" />
           <div v-if="ps.abResult.answerA" class="ab-answer">
             <div class="ab-answer-label">A 的回答</div>
-            <div class="ab-answer-text" v-html="renderMd(ps.abResult.answerA)" />
+            <div class="ab-answer-text markdown-body" v-html="renderMd(ps.abResult.answerA)" />
             <div v-if="ps.abResult.evaluation?.scoreA" class="score-row">
               <span v-for="k in scoreKeys" :key="k" class="score-chip">
                 {{ scoreLabelMap[k] }}: {{ ps.abResult.evaluation.scoreA[k] }}
@@ -105,7 +106,7 @@
           <textarea v-model="ps.abConfig.systemPromptB" class="input ab-input" placeholder="System Prompt B..." rows="5" />
           <div v-if="ps.abResult.answerB" class="ab-answer">
             <div class="ab-answer-label">B 的回答</div>
-            <div class="ab-answer-text" v-html="renderMd(ps.abResult.answerB)" />
+            <div class="ab-answer-text markdown-body" v-html="renderMd(ps.abResult.answerB)" />
             <div v-if="ps.abResult.evaluation?.scoreB" class="score-row">
               <span v-for="k in scoreKeys" :key="k" class="score-chip">
                 {{ scoreLabelMap[k] }}: {{ ps.abResult.evaluation.scoreB[k] }}
@@ -165,7 +166,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
 import { usePromptStore } from '@/stores/prompt.js'
 import { useAppStore } from '@/stores/app.js'
@@ -174,6 +175,16 @@ const ps       = usePromptStore()
 const appStore = useAppStore()
 
 const activeTab     = ref('test')
+
+// A/B 的两个回答是并行流式出来的，边生成边长 —— 跟到底部，别让用户自己追
+const abPanelEl = ref(null)
+watch(() => [ps.abResult.answerA.length, ps.abResult.answerB.length], async () => {
+  const el = abPanelEl.value
+  if (!el) return
+  const stick = el.parentElement.scrollHeight - el.parentElement.scrollTop - el.parentElement.clientHeight < 220
+  await nextTick()
+  if (stick && el.parentElement) el.parentElement.scrollTop = el.parentElement.scrollHeight
+})
 const showTemplates = ref(false)
 const selectedId    = ref('')
 const editing       = ref(null)

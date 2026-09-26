@@ -84,6 +84,24 @@
   padding: 0;
 }
 
+/* ── Markdown 正文：列表标号必须看得见 ──────────────────────────
+   上面那句 `padding: 0` 会把 ol/ul 的 padding-left 一起清零，
+   而浏览器的列表标号（1. 2. 3. / •）正是画在 padding 区域里的 ——
+   清零后标号被裁掉，用户只看到文字、看不到序号。
+   实测：Prompt 的 A/B 对比里 A 明明是编号列表，页面上却"没有 1,2,3"，
+   一度以为是模型没按格式输出，其实是样式把它藏了。
+   聊天页自己有 scoped 规则所以没事，Agent / 工作流 / Prompt 都缺这一段。 */
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.6em;
+  margin: .5em 0;
+}
+.markdown-body li { margin: .25em 0; }
+.markdown-body ul { list-style: disc; }
+.markdown-body ol { list-style: decimal; }
+.markdown-body ul ul { list-style: circle; }
+.markdown-body ol ol { list-style: lower-alpha; }
+
 html, body {
   height: 100%;
   font-family: var(--font-sans);

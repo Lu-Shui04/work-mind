@@ -1,6 +1,7 @@
 # server-py/app/routes/chat.py
 # 对话路由：意图判断 → （按权限）检索知识库 → 带引用流式回答 + 缓存 + 会话管理 + 画像
 import asyncio
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -9,15 +10,16 @@ from pydantic import BaseModel, Field
 from app.middleware import rate_limiter, security_check
 from app.services.cache import cache
 from app.services.chat.memory import (
-    clear_all, clear_history, extract_and_update_profile, get_history, get_profile,
-    list_sessions, profile_to_context, trim_history,
+    append_turn, clear_all, clear_history, extract_and_update_profile, get_profile,
+    list_sessions, memory_messages, profile_to_context,
 )
 from app.services.db import StorageUnavailable
 from app.services.identity import User, current_user
 from app.services.model import chat_model
 from app.services.rag.intent import classify_intent
 from app.services.rag.query import (
-    ANSWER_POLICY, SearchFilters, build_context, no_knowledge_reply, retrieve_with_meta,
+    SearchFilters, build_context, no_knowledge_reply, resolve_knowledge_mode,
+    retrieve_with_meta,
 )
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
@@ -77,9 +79,12 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
     message = body.message
 
     async def generator():
+        # 看板上的"平均响应/P99"要包含对话（最常用的入口）。
+        # 以前这里写死 latency_ms=0，于是对话永远不出现在延迟统计里。
+        started = time.time()
         try:
             base_system = ASSISTANT_SYSTEM
-            profile = get_profile(user_id)
+            profile = await get_profile(user_id, user.tenant_id)
             profile_ctx = profile_to_context(profile)
 
             # ── 1) 意图判断：这次要不要查知识库 ──────────────────────
@@ -149,20 +154,20 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                                  "clearance": user.clearance},
                 }
 
-                # ── 知识优先：检索不到就不作答 ──────────────────────
-                # 不调用模型 = 不可能拿模型自身的知识去顶，也就不会和公司资料口径打架。
-                # 答复里已经把"为什么没找到 + 下一步怎么办"讲清楚（见 no_knowledge_reply）。
-                if not sources and ANSWER_POLICY == "grounded":
+                # ── 没命中时怎么办：三种模式的语义必须分清（以前是混的）──────
+                #   强制（useKnowledge=true）：只依据知识库，查不到就说查不到，
+                #                              不许拿模型自己的知识兜底（怕和公司口径打架）
+                #   自动（undefined）：先明确说明"库里没有"，**然后照常用通用知识回答**
+                #                      （用户要的就是这个：别拿一句"没找到"把人堵死）
+                #   关闭（false）：压根不检索，直接回答，不会出现任何"未找到"话术
+                # 部署方仍可用 RAG_ANSWER_POLICY=grounded 让"自动"也走严格模式。
+                if resolve_knowledge_mode(body.useKnowledge, need, sources) == "grounded_miss":
                     text = no_knowledge_reply(recall)
                     yield "start", {"sessionId": session_id}
                     for i in range(0, len(text), 3):
                         yield "token", {"token": text[i:i + 3]}
                         await asyncio.sleep(0.006)
-                    hist = get_history(session_id)
-                    hist.append(HumanMessage(content=message))
-                    hist.append(AIMessage(content=text))
-                    if len(hist) > 20:
-                        del hist[:2]
+                    await append_turn(session_id, message, text, user.tenant_id, user_id)
                     yield "done", {"fromCache": False, "inputTokens": 0, "outputTokens": 0,
                                    "sourceCount": 0, "grounded": True,
                                    "reason": (recall or {}).get("reason")}
@@ -173,6 +178,17 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                     return
 
             # ── 3) 组装 system：角色 + 画像 + （检索到的）参考资料 ────
+            # 自动模式下"库里没有"时：先给用户一句说明，再让模型用通用知识回答。
+            # 说明放在回答开头（而不是让模型自己措辞），保证每次都能说清楚、
+            # 也保证它不会被误读成"公司资料"。
+            miss_notice = ""
+            if resolve_knowledge_mode(body.useKnowledge, need, sources) == "fallback_miss":
+                explain = (recall or {}).get("explain") or "没有可用内容"
+                miss_notice = (f"（知识库未命中：{explain}。以下回答来自通用知识，不代表公司口径。）"
+                               "\n\n")
+                base_system += ("\n\n注意：本轮问题在企业知识库中**没有查到相关资料**，"
+                                "请用通用知识回答，不要编造公司制度、数字或出处。")
+
             context_block = ""
             if sources:
                 context_block = (
@@ -195,18 +211,39 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 for i in range(0, len(text), 3):
                     yield "token", {"token": text[i:i + 3]}
                     await asyncio.sleep(0.006)
-                yield "done", {"fromCache": True, "sourceCount": len(sources)}
+                # 缓存命中的回答同样要进记忆，否则下一轮会"忘记"这次说过什么
+                await append_turn(session_id, message, text, user.tenant_id, user_id)
+                # 缓存命中也必须记账：这是看板"缓存命中率"的唯一数据来源。
+                # 以前这条分支直接 return，没调 record_api_call ——
+                # 于是不管命中多少次的对话，看板上永远是 0% 命中率、¥0 省下的钱。
+                from app.routes.monitor import record_api_call
+                record_api_call(
+                    feature="chat", from_cache=True,
+                    saved_tokens=int(cached.get("tokens") or 0),
+                    latency_ms=round((time.time() - started) * 1000),
+                    tenant_id=user.tenant_id, user_id=user_id,
+                )
+                yield "done", {"fromCache": True, "sourceCount": len(sources),
+                               "savedTokens": int(cached.get("tokens") or 0)}
                 return
 
-            history = get_history(session_id)
-            trimmed = trim_history(history, 2000)
-            messages = [SystemMessage(content=system_prompt), *trimmed, HumanMessage(content=message)]
+            # 记忆 = 【此前对话摘要】+ 最近 N 轮原文（见 services/chat/memory.py）
+            messages = [SystemMessage(content=system_prompt),
+                        *await memory_messages(session_id, user.tenant_id),
+                        HumanMessage(content=message)]
 
             yield "start", {"sessionId": session_id}
 
             full_reply = ""
             input_tokens = 0
             output_tokens = 0
+
+            # 先把"知识库未命中"的说明推出去，再流式输出模型回答
+            if miss_notice:
+                full_reply += miss_notice
+                for i in range(0, len(miss_notice), 3):
+                    yield "token", {"token": miss_notice[i:i + 3]}
+                    await asyncio.sleep(0.004)
 
             async for chunk in chat_model.astream(messages):
                 if chunk.content:
@@ -216,19 +253,19 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                     input_tokens = chunk.usage_metadata.get("input_tokens", 0)
                     output_tokens = chunk.usage_metadata.get("output_tokens", 0)
 
-            history.append(HumanMessage(content=message))
-            history.append(AIMessage(content=full_reply))
-            if len(history) > 20:
-                del history[:2]
+            # 记住这一轮；超过阈值会自动异步压缩更早的对话（不阻塞本次回答）
+            await append_turn(session_id, message, full_reply, user.tenant_id, user_id)
 
             cache.set(system_prompt, message, full_reply, input_tokens + output_tokens, scope)
 
-            asyncio.create_task(_safe_extract_profile(user_id, message, full_reply))
+            asyncio.create_task(
+                _safe_extract_profile(user_id, message, full_reply, user.tenant_id))
 
             # 用量统计：落库后才能在看板上看到真实数字（此前 record_api_call 从未被调用）
             from app.routes.monitor import record_api_call
             record_api_call(feature="chat", input_tokens=input_tokens, output_tokens=output_tokens,
-                            latency_ms=0, from_cache=False)
+                            latency_ms=round((time.time() - started) * 1000), from_cache=False,
+                            tenant_id=user.tenant_id, user_id=user_id)
 
             yield "done", {
                 "fromCache": False, "inputTokens": input_tokens, "outputTokens": output_tokens,
@@ -246,37 +283,37 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
     return sse_stream(generator)
 
 
-async def _safe_extract_profile(user_id: str, message: str, reply: str):
+async def _safe_extract_profile(user_id: str, message: str, reply: str, tenant_id: str):
     try:
-        await extract_and_update_profile(user_id, message, reply)
+        await extract_and_update_profile(user_id, message, reply, tenant_id)
     except Exception:
         pass
 
 
 @router.get("/sessions")
-async def sessions():
-    return {"sessions": list_sessions()}
+async def sessions(user: User = Depends(current_user)):
+    """列出当前租户的会话（会话落库了，重启后这里依然看得到）。"""
+    return {"sessions": await list_sessions(user.tenant_id)}
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
-    clear_history(session_id)
+async def delete_session(session_id: str, user: User = Depends(current_user)):
+    await clear_history(session_id, user.tenant_id)
     return {"success": True}
 
 
 @router.delete("/sessions")
-async def clear_sessions():
-    """清空全部会话（测试时清理上下文用）。"""
-    from app.services.chat.memory import list_sessions
-    n = len(list_sessions())
-    clear_all()
+async def clear_sessions(user: User = Depends(current_user)):
+    """清空当前租户的全部会话（测试时清理上下文用）。"""
+    n = len(await list_sessions(user.tenant_id))
+    await clear_all(user.tenant_id)
     logger.info("chat: all sessions cleared", {"count": n})
     return {"success": True, "cleared": n}
 
 
 @router.get("/profile/{user_id}")
-async def profile(user_id: str):
-    return get_profile(user_id)
+async def profile(user_id: str, user: User = Depends(current_user)):
+    return await get_profile(user_id, user.tenant_id)
 
 
 @router.get("/roles")

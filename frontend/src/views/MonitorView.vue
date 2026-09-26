@@ -3,7 +3,9 @@
   <div class="monitor-view">
     <div class="metrics-grid">
       <MetricCard label="今日 API 调用" :value="s.overview?.apiCallsToday ?? 0" :sub="`总计 ${s.overview?.totalCallsToday ?? 0} 次`" color="blue" />
-      <MetricCard label="缓存命中率" :value="s.overview?.cacheHitRate ?? '0%'" :sub="`命中 ${s.overview?.cacheHitsToday ?? 0} 次`" color="purple" />
+      <MetricCard label="缓存命中率" :value="s.overview?.cacheHitRate ?? '0%'"
+                  :sub="`命中 ${s.overview?.cacheHitsToday ?? 0} 次 · 省下 ${s.overview?.savedTokensToday ?? 0} tokens`"
+                  color="purple" />
       <MetricCard label="今日费用" :value="`¥${s.overview?.costCNYToday ?? 0}`" :sub="`预算 ¥${s.overview?.dailyBudget ?? 50}`" color="amber" />
       <MetricCard label="平均响应" :value="`${s.latency?.avg ?? 0}ms`" :sub="`P99: ${s.latency?.p99 ?? 0}ms`" color="green" />
     </div>
@@ -12,6 +14,13 @@
       <div class="budget-label">
         <span>今日预算使用</span>
         <span class="budget-pct" :class="{ warn: (s.overview?.budgetUsedPct??0) >= 80 }">{{ s.overview?.budgetUsedPct ?? 0 }}%</span>
+        <!-- 数据源必须显式标出来：落库(postgres)=重启不丢；memory=降级，只统计当前进程 -->
+        <span class="source-badge" :class="{ degraded: s.overview?.dataSource !== 'postgres' }"
+              :title="s.overview?.dataSource === 'postgres'
+                ? '统计已落库（PostgreSQL usage_calls），重启/重建容器都不会丢'
+                : '数据库不可用，当前只统计本进程内的调用，重启会丢'">
+          {{ s.overview?.dataSource === 'postgres' ? '数据源：PostgreSQL' : '数据源：内存（降级）' }}
+        </span>
         <button class="btn-text-xs" @click="showBE = !showBE">修改预算</button>
       </div>
       <div class="budget-bar">
@@ -92,7 +101,11 @@
               <td>{{ c.inputT }}</td><td>{{ c.outputT }}</td>
               <td>{{ c.fromCache ? '—' : `¥${c.costCNY}` }}</td>
               <td>{{ c.fromCache ? '—' : `${c.latencyMs}ms` }}</td>
-              <td><span :class="c.fromCache ? 'cache-badge' : 'api-badge'">{{ c.fromCache ? '缓存' : 'API' }}</span></td>
+              <td>
+                <span :class="c.fromCache ? 'cache-badge' : 'api-badge'">{{ c.fromCache ? '缓存' : 'API' }}</span>
+                <!-- 估算：embedding / bge 重排这类接口不回 usage，token 是按字符估的，如实标出来 -->
+                <span v-if="c.estimated" class="est-badge" title="该接口不返回 usage，token 按字符估算">估算</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -101,15 +114,24 @@
   </div>
 </template>
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import http from '@/utils/http.js'
 import { useAppStore } from '@/stores/app.js'
+import { useMonitorStore } from '@/stores/monitor.js'
 const appStore = useAppStore()
-const s = ref({})
+// 看板数据统一来自 store（后端 /api/monitor/stats），顶部预算预警和这里是同一份数字，
+// 不再各算各的（以前页面自己拉接口、顶栏读前端计数器，两边对不上）
+const mon = useMonitorStore()
+const s = computed(() => ({
+  overview: mon.overview,
+  latency: mon.latency,
+  last7Days: mon.last7Days,
+  byFeature: mon.byFeature,
+  recentCalls: mon.recentCalls,
+}))
 const showBE = ref(false)
 const newBudget = ref(50)
 const featureFilter = ref('')
-let pollTimer = null
 const featureNames = { chat:'对话助手', knowledge:'RAG 知识库', agent:'任务 Agent', workflow:'内容工作流', erp:'ERP 审批', prompt:'Prompt 调试' }
 function featureLabel(f) { return featureNames[f] || f }
 // 重置用量与缓存统计（测试时把累计数字清零，避免干扰判断）
@@ -128,8 +150,10 @@ async function resetStats() {
   }
 }
 
+// 统一走 store 的 refresh：数字来源只有后端一处，顶部预警和看板永远一致
 async function loadStats() {
-  try { const d = await http.get('/monitor/stats'); s.value = d; newBudget.value = d.overview?.dailyBudget ?? 50 } catch {}
+  const d = await mon.refresh()
+  newBudget.value = d?.overview?.dailyBudget ?? newBudget.value
 }
 async function updateBudget() {
   await http.put('/monitor/budget', { dailyBudget: newBudget.value })
@@ -143,8 +167,8 @@ const latencyItems = computed(() => ({ P50: s.value.latency?.p50??0, P90: s.valu
 const filteredCalls = computed(() => { const c = s.value.recentCalls||[]; return featureFilter.value ? c.filter(x=>x.feature===featureFilter.value) : c })
 const featureOptions = computed(() => [...new Set((s.value.recentCalls||[]).map(c=>c.feature))].map(f=>({ feature:f, label:featureLabel(f) })))
 function fmtTime(iso) { if (!iso) return ''; const d = new Date(iso); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}` }
-onMounted(() => { loadStats(); pollTimer = setInterval(loadStats, 10000) })
-onUnmounted(() => clearInterval(pollTimer))
+// 轮询交给 store（顶部栏已经 start 了同一个定时器），这里只保证进来先拉一次
+onMounted(() => { mon.refresh(); newBudget.value = mon.dailyBudget })
 </script>
 <script>
 const MetricCard = {
@@ -154,7 +178,15 @@ const MetricCard = {
 export default { components: { MetricCard } }
 </script>
 <style scoped>
+/* 为什么必须有 > * { flex-shrink:0 }：
+   .monitor-view 是 flex 纵向容器，子项默认 flex-shrink:1 —— 视口一变矮，
+   卡片就被"压缩"到几十像素而不是把容器撑高，于是 overflow-y:auto 永远没有可滚的内容，
+   表现就是**界面完全没法上下滑动**（表格被压成 31px、内容被裁掉还看不到滚动条）。
+   让子项保持自然高度，容器才会真正溢出 -> 滚动条出现。 */
 .monitor-view { height:100%; overflow-y:auto; padding:var(--space-lg) var(--space-xl); display:flex; flex-direction:column; gap:var(--space-lg); background:var(--color-bg); }
+.monitor-view > * { flex-shrink: 0; }
+/* 窄屏/矮窗口下指标卡两列、图表竖排，避免四个卡片挤成一团 */
+@media (max-width: 1180px) { .metrics-grid { grid-template-columns:repeat(2,1fr); } .charts-row { grid-template-columns:1fr; } }
 .metrics-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:var(--space-md); }
 .metric-card { background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-lg); padding:var(--space-md) var(--space-lg); }
 .color-blue   { border-top:3px solid var(--color-info); }
@@ -171,6 +203,8 @@ export default { components: { MetricCard } }
 .budget-pct { font-weight:700; color:var(--color-text); }
 .budget-pct.warn { color:var(--color-warning); }
 .btn-text-xs { font-size:11px; color:var(--color-primary); background:none; border:none; cursor:pointer; margin-left:auto; }
+.source-badge { font-size:10px; padding:2px 8px; border-radius:var(--radius-full); background:var(--color-border-light); color:var(--color-text-muted); }
+.source-badge.degraded { background:#fef3c7; color:#b45309; }
 .budget-bar { height:6px; background:var(--color-border); border-radius:var(--radius-full); overflow:hidden; }
 .budget-fill { height:100%; background:var(--color-primary); border-radius:var(--radius-full); transition:width .5s; }
 .budget-fill.warn { background:var(--color-warning); }
@@ -223,4 +257,5 @@ export default { components: { MetricCard } }
 .feature-tag { font-size:10px; padding:2px 7px; background:var(--color-primary-bg); color:var(--color-primary); border-radius:var(--radius-full); }
 .cache-badge { font-size:10px; padding:2px 7px; background:#ede9fe; color:#6d28d9; border-radius:var(--radius-full); }
 .api-badge { font-size:10px; padding:2px 7px; background:var(--color-border-light); color:var(--color-text-muted); border-radius:var(--radius-full); }
+.est-badge { font-size:10px; padding:2px 6px; margin-left:4px; background:#fff7ed; color:#c2410c; border-radius:var(--radius-full); }
 </style>

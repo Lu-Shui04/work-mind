@@ -117,8 +117,11 @@ export const useWorkflowStore = defineStore('workflow', () => {
   // ── 启动工作流 ─────────────────────────────────────────────
   async function startWorkflow(input) {
     if (running.value) return
-    running.value = true
+    // ⚠️ 顺序不能反：reset() 内部会把 running 置回 false，
+    // 先置 true 再 reset 等于没置 —— 表现就是"点开始执行后界面一直停在输入表单上"，
+    // 用户既看不到进度也看不到转圈（真实踩过）。
     reset()
+    running.value = true
 
     await fetchStream(
       '/api/workflow/start/stream',
@@ -129,13 +132,21 @@ export const useWorkflowStore = defineStore('workflow', () => {
             currentThreadId.value = data.threadId
           }
 
+          // 流式 token：结果节点的进正文面板，其它节点的贴在对应流程卡片上
+          // （这样"流程走到哪一步、正在生成什么"都能实时看见）
+          if (event === 'token') {
+            appendToken(data)
+            return
+          }
+
           if (event === 'node_start') {
             nodeStates[data.nodeId] = 'running'
           }
 
           if (event === 'node_done') {
             nodeStates[data.nodeId] = 'done'
-            if (data.preview) nodeOutputs[data.nodeId] = data.preview
+            // 实时流出来的内容比后端给的 80 字预览完整，别用预览覆盖掉
+            if (data.preview && !nodeOutputs[data.nodeId]) nodeOutputs[data.nodeId] = data.preview
           }
 
           if (event === 'paused') {
@@ -164,6 +175,22 @@ export const useWorkflowStore = defineStore('workflow', () => {
     )
   }
 
+  // 单个节点的预览不无限增长，超过就截断（流程图卡片只用于"看进度"，不用于读全文）
+  const NODE_PREVIEW_LIMIT = 240
+  function appendToken(data) {
+    if (!data || !data.token) return
+    if (data.isResult) {
+      streamBuffer.value += data.token
+      return
+    }
+    const id = data.nodeId
+    if (!id) return
+    const prev = nodeOutputs[id] || ''
+    if (prev.length < NODE_PREVIEW_LIMIT) {
+      nodeOutputs[id] = (prev + data.token).slice(0, NODE_PREVIEW_LIMIT)
+    }
+  }
+
   // ── 恢复工作流（注入人工反馈后继续）──────────────────────
   async function resumeWorkflow(feedback = '') {
     if (!currentThreadId.value || running.value) return
@@ -176,10 +203,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
       '/api/workflow/resume/stream',
       { threadId: currentThreadId.value, feedback },
       {
-        onToken: (token) => {
-          streamBuffer.value += token
-        },
+        // 这里刻意不注册 onToken：工作流的 token 要按 nodeId 分流（正文 vs 节点卡片），
+        // 统一走 onEvent 最简单（onToken 只给 token 文本，拿不到 nodeId）
         onEvent: (event, data) => {
+          if (event === 'token') {
+            appendToken(data)
+            return
+          }
           if (event === 'node_start') {
             nodeStates[data.nodeId] = 'running'
           }

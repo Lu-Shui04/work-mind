@@ -1,7 +1,7 @@
 // frontend/src/stores/chat.js
 // 对话模块全局状态：会话列表、当前会话消息、角色、用户画像
 import { defineStore } from 'pinia'
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import { fetchStream } from '@/utils/http.js'
 import http from '@/utils/http.js'
 import { useAppStore } from './app.js'
@@ -73,10 +73,19 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // ── 知识库检索模式（用户显式控制，覆盖后端的自动判定）────────
-  //   auto  = 自动（后端"召回优先"：默认就查，只有闲聊/纯算式才跳过）
-  //   force = 强制检索（这次一定要查库）
-  //   off   = 关闭检索（这次只凭模型自身知识回答）
-  const knowledgeMode = ref('auto')
+  // 三种模式的语义（后端严格按这个执行）：
+  //   auto  = 自动：默认就查库；查到就用资料回答（带引用），
+  //           **查不到会明确说明，然后照样用通用知识回答** —— 不会拿一句"没找到"把人堵死
+  //   force = 强制：只依据知识库作答，查不到就说查不到，不许用模型自己的知识补充
+  //   off   = 关闭：压根不查库，直接回答
+  //
+  // 要持久化：以前是纯内存状态，刷新页面/切页面后静默回到"自动"，
+  // 用户明明选了"关闭"，下一次提问又走了知识库 —— 这是个真实的坑。
+  const KB_MODE_KEY = 'workmind.chat.kbMode'
+  const knowledgeMode = ref(localStorage.getItem(KB_MODE_KEY) || 'auto')
+  watch(knowledgeMode, (v) => {
+    try { localStorage.setItem(KB_MODE_KEY, v) } catch { /* 隐私模式下写不了，忽略 */ }
+  })
 
   // ── 检索范围（替代原来的"角色选择器"）────────────────────────
   // 角色只换一句 system prompt、不影响检索到哪些文档；这里每一项都真的
@@ -178,19 +187,12 @@ export const useChatStore = defineStore('chat', () => {
             aiMsg.recall  = data.recall || null
           }
         },
-        onDone: (data) => {
+        onDone: () => {
           aiMsg.streaming = false
-          // 记录用量
-          if (!data.fromCache) {
-            monitorStore.recordCall({
-              inputTokens:  data.inputTokens || 0,
-              outputTokens: data.outputTokens || 0,
-              fromCache:    false,
-              feature:      'chat',
-            })
-          } else {
-            monitorStore.recordCall({ fromCache: true, feature: 'chat' })
-          }
+          // 用量由**后端**记账：每次模型调用写一行 usage_calls（命中也记，含省下的 token）。
+          // 以前前端在这里自己累加 todaySpend，那份数字只活在当前浏览器标签里，
+          // 一刷新就归零，和看板上的数字永远对不上。这里只负责稍后刷新看板。
+          setTimeout(() => monitorStore.refresh(), 600)
           // 刷新画像（后台可能更新了）
           loadProfile()
         },

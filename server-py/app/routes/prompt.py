@@ -68,8 +68,18 @@ async def test_stream(body: dict):
     return sse_stream(generator)
 
 
-@router.post("/ab-test", dependencies=[Depends(rate_limiter)])
-async def ab_test(body: dict):
+@router.post("/ab-test/stream", dependencies=[Depends(rate_limiter)])
+async def ab_test_stream(body: dict):
+    """A/B 对比（流式）。
+
+    为什么要改成流式：这个接口要跑 **2 次生成 + 3 次评分共 5 次模型调用**，
+    是最慢的一个入口（十几秒到几十秒）。以前是等全部跑完再一次性返回，
+    用户面对的就是一个"测试中..."转圈，完全不知道进行到哪了 ——
+    实测同样的毛病：单次测试是流式的，A/B 不是。
+
+    事件：token{variant} → variant_done{variant} → scoring → done{answerA,answerB,evaluation}
+    两个变体**并行**生成，token 用 variant 区分，前端各追加到自己那一列。
+    """
     question = (body.get("question") or "").strip()
     system_prompt_a = body.get("systemPromptA")
     system_prompt_b = body.get("systemPromptB")
@@ -79,27 +89,69 @@ async def ab_test(body: dict):
     if not question:
         raise HTTPException(status_code=400, detail={"error": {"message": "测试问题不能为空"}})
 
-    try:
-        test_model = create_chat_model(temperature=temperature)
+    async def generator():
+        queue: asyncio.Queue = asyncio.Queue()
+        answers = {"a": "", "b": ""}
+        # 两个变体各自的真实 token：A/B 一次要跑 5 次模型调用，不记的话看板上
+        # "Prompt 调试"就只有调用次数、费用永远是 ¥0（实测就是这样）
+        variant_usage = {"a": (0, 0), "b": (0, 0)}
+        started = time.time()
 
-        async def invoke_with(system_prompt):
+        async def run_variant(key: str, system_prompt: str | None):
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": question})
-            return await test_model.ainvoke(messages, max_tokens=max_tokens)
+            model = create_chat_model(temperature=temperature, streaming=True)
+            try:
+                async for chunk in model.astream(messages, max_tokens=max_tokens):
+                    text = chunk.content or ""
+                    if text:
+                        answers[key] += text
+                        await queue.put(("token", {"variant": key, "token": text}))
+                    usage = getattr(chunk, "usage_metadata", None)
+                    if usage:
+                        variant_usage[key] = (usage.get("input_tokens", 0) or 0,
+                                              usage.get("output_tokens", 0) or 0)
+            except Exception as err:  # noqa: BLE001 - 单个变体失败不该拖垮整次对比
+                logger.error("ab test variant failed", {"variant": key, "error": str(err)})
+                await queue.put(("variant_error", {"variant": key, "message": str(err)[:200]}))
+            finally:
+                await queue.put(("variant_done", {"variant": key}))
 
-        res_a, res_b = await asyncio.gather(invoke_with(system_prompt_a), invoke_with(system_prompt_b))
+        yield "start", {"question": question}
+        tasks = [asyncio.create_task(run_variant("a", system_prompt_a)),
+                 asyncio.create_task(run_variant("b", system_prompt_b))]
 
-        answer_a, answer_b = res_a.content, res_b.content
-        evaluation = await score_ab_test(question, answer_a, answer_b)
-        # A/B 会跑 2 次生成 + 3 次评分，按 5 次调用记账（评分的 token 未单独统计，保守计入）
-        record_api_call(feature="prompt", input_tokens=0, output_tokens=0, latency_ms=0, from_cache=False)
+        finished = 0
+        while finished < 2:
+            event_type, data = await queue.get()
+            yield event_type, data
+            if event_type == "variant_done":
+                finished += 1
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-        return {"answerA": answer_a, "answerB": answer_b, "evaluation": evaluation}
-    except Exception as err:
-        logger.error("ab test error", {"error": str(err)})
-        raise HTTPException(status_code=500, detail={"error": {"message": "测试失败，请重试"}})
+        # 两个变体都出完了才开始评分（评分本身要读完整答案）
+        yield "scoring", {}
+        score_usage: dict = {}
+        try:
+            evaluation = await score_ab_test(question, answers["a"], answers["b"],
+                                             usage_out=score_usage)
+        except Exception as err:  # noqa: BLE001
+            logger.error("ab test scoring failed", {"error": str(err)})
+            evaluation = None
+
+        # A/B = 2 次生成 + 3 次评分的真实用量，合成一条记录（一次用户操作 = 一行）
+        input_tokens = sum(v[0] for v in variant_usage.values()) + int(score_usage.get("input_tokens", 0))
+        output_tokens = sum(v[1] for v in variant_usage.values()) + int(score_usage.get("output_tokens", 0))
+        record_api_call(feature="prompt", input_tokens=input_tokens, output_tokens=output_tokens,
+                        latency_ms=round((time.time() - started) * 1000), from_cache=False,
+                        estimated=(input_tokens == 0 and output_tokens == 0))
+        logger.info("ab test done", {"latencyMs": round((time.time() - started) * 1000)})
+
+        yield "done", {"answerA": answers["a"], "answerB": answers["b"], "evaluation": evaluation}
+
+    return sse_stream(generator)
 
 
 # ── CRUD：模板管理 ────────────────────────────────────────────

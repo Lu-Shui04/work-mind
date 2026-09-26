@@ -76,16 +76,40 @@
             </span>
           </div>
 
-          <!-- 知识库引用来源 -->
+          <!-- 知识库引用来源：默认折叠成一行的摘要，点开才铺开 -->
+          <!-- 为什么默认折叠：一次命中 6 条引用会占掉大半屏，把任务描述和最终回答顶到屏幕外，
+               用户想看的"任务和答案"反而要往下翻。折叠后一行就能说明命中了几条、最高多少分。 -->
           <div v-if="task.sources?.length" class="agent-sources">
-            <div v-for="(s, i) in task.sources" :key="s.chunkId" class="agent-source">
-              <span class="as-idx">[{{ i + 1 }}]</span>
-              <span class="as-title">{{ s.title }}</span>
-              <span class="as-loc">{{ s.pageLabel || (s.pageNumber ? '第' + s.pageNumber + '页' : '无页码') }}</span>
-              <span class="as-meta">{{ s.department }} · {{ s.version }}</span>
-              <span class="as-score">{{ (s.score * 100).toFixed(0) }}%</span>
+            <button class="as-toggle" :class="{ open: isSourcesOpen(task.id) }" @click="toggleSources(task.id)">
+              <el-icon class="as-caret"><ArrowRight /></el-icon>
+              <span class="as-toggle-label">引用来源</span>
+              <span class="as-toggle-count">{{ task.sources.length }} 条</span>
+              <span class="as-toggle-best">最高 {{ bestSourceScore(task) }}%</span>
+              <span class="as-toggle-hint">{{ isSourcesOpen(task.id) ? '收起' : '展开看原文' }}</span>
+            </button>
+
+            <div v-if="isSourcesOpen(task.id)" class="as-list">
+              <div v-for="(s, i) in task.sources" :key="s.chunkId" class="agent-source">
+                <div class="as-row" @click="toggleSource(task.id, i)">
+                  <span class="as-idx">[{{ i + 1 }}]</span>
+                  <span class="as-title">{{ s.title }}</span>
+                  <span class="as-loc">{{ s.pageLabel || (s.pageNumber ? '第' + s.pageNumber + '页' : '无页码') }}</span>
+                  <span class="as-meta">{{ s.department }} · {{ s.version }}</span>
+                  <span class="as-score">{{ (s.score * 100).toFixed(0) }}%</span>
+                  <span class="as-caret-sm" :class="{ open: isSourceOpen(task.id, i) }">▾</span>
+                </div>
+                <!-- 展开看这一条到底引了什么：章节路径 + 原文片段 -->
+                <div v-if="isSourceOpen(task.id, i)" class="as-detail">
+                  <div v-if="s.headingPath?.length" class="as-path">{{ s.headingPath.join(' › ') }}</div>
+                  <div class="as-content">{{ s.content || s.preview }}</div>
+                  <div v-if="s.fileName" class="as-file">源文件：{{ s.fileName }}</div>
+                </div>
+              </div>
             </div>
           </div>
+
+          <!-- 过程说明：调工具之前模型的"我先查一下"，降级显示，不混进最终回答 -->
+          <div v-if="task.narration" class="task-narration">{{ task.narration }}</div>
 
           <div v-if="task.steps.length" class="steps-list">
             <ToolCallCard v-for="step in task.steps" :key="step.id" :step="step" />
@@ -93,6 +117,11 @@
           <div v-if="task.status === 'running' && !task.steps.length" class="thinking-hint">
             <div class="spinner" /><span>Agent 正在思考...</span>
           </div>
+          <!-- 步数用尽被强制收尾：明确告诉用户这份回答是"基于已有信息的总结" -->
+          <div v-if="task.maxStepsReached" class="task-notice">
+            已达最大步数：以下回答是 Agent 基于已获取信息自动收尾的总结，可能不完整。
+          </div>
+
           <div v-if="task.answer" class="final-answer">
             <div class="answer-header">
               <span>最终回答</span>
@@ -108,7 +137,7 @@
   </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, reactive, watch, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import { useAgentStore } from '@/stores/agent.js'
@@ -135,6 +164,36 @@ async function runTask() {
 }
 function useExample(task) { if (!agentStore.running) taskText.value = task }
 async function copyAnswer(text) { await navigator.clipboard.writeText(text); appStore.toast.success('已复制') }
+
+// ── 引用来源的展开状态 ─────────────────────────────────────────
+// 默认全部折叠：一次命中 6 条引用会占掉大半屏，把任务和最终回答顶到屏幕外。
+const openSources = reactive({})   // { [taskId]: 是否展开整个引用区 }
+const openItems   = reactive({})   // { 'taskId-index': 是否展开单条原文 }
+const isSourcesOpen = (id) => !!openSources[id]
+const toggleSources = (id) => { openSources[id] = !openSources[id] }
+const isSourceOpen = (id, i) => !!openItems[`${id}-${i}`]
+const toggleSource = (id, i) => { openItems[`${id}-${i}`] = !openItems[`${id}-${i}`] }
+const bestSourceScore = (task) =>
+  Math.max(0, ...(task.sources || []).map((s) => Math.round((s.score || 0) * 100)))
+
+// ── 新任务在列表末尾，自动跟到最新一次执行 ─────────────────────
+function scrollToBottom() {
+  const el = taskListEl.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+// 新任务一定滚到底（否则用户看不到刚点下去的任务）
+watch(() => agentStore.tasks.length, async () => { await nextTick(); scrollToBottom() })
+// 流式输出时不抢滚动条：只有用户本来就贴在底部才继续跟随
+watch(
+  () => agentStore.tasks[agentStore.tasks.length - 1]?.answer?.length || 0,
+  async () => {
+    const el = taskListEl.value
+    const stick = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 160 : true
+    await nextTick()
+    if (stick) scrollToBottom()
+  },
+)
+
 onMounted(() => agentStore.loadMeta())
 </script>
 <style scoped>
@@ -173,18 +232,56 @@ onMounted(() => agentStore.loadMeta())
   background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--radius-sm);
   padding: 6px 9px; margin-bottom: 8px;
 }
-.agent-sources { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
-.agent-source {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  font-size: 11px; padding: 4px 8px;
+.agent-sources { margin-bottom: 8px; }
+
+/* 折叠态摘要行：一行说清"命中几条、最高多少分" */
+.as-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 9px; font-size: 11.5px; cursor: pointer;
   background: var(--color-bg); border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm); color: var(--color-text-sub);
+  transition: all var(--transition); text-align: left;
 }
+.as-toggle:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.as-caret { font-size: 11px; transition: transform .15s ease; }
+.as-toggle.open .as-caret { transform: rotate(90deg); }
+.as-toggle-label { font-weight: 600; }
+.as-toggle-count {
+  background: var(--color-primary-bg); color: var(--color-primary-dark);
+  border-radius: var(--radius-full); padding: 0 7px; font-weight: 600;
+}
+.as-toggle-best { color: var(--color-success); font-family: var(--font-mono); }
+.as-toggle-hint { margin-left: auto; color: var(--color-text-muted); }
+
+.as-list { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+.agent-source {
+  background: var(--color-bg); border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm); overflow: hidden;
+}
+.as-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; padding: 4px 8px; cursor: pointer;
+}
+.as-row:hover { background: var(--color-border-light); }
 .as-idx { font-family: var(--font-mono); color: var(--color-primary); font-weight: 600; }
 .as-title { font-weight: 600; color: var(--color-text); }
 .as-loc { color: var(--color-text-muted); }
 .as-meta { color: var(--color-primary-dark); background: var(--color-primary-bg); border-radius: var(--radius-full); padding: 0 6px; }
 .as-score { margin-left: auto; color: var(--color-success); font-family: var(--font-mono); }
+.as-caret-sm { color: var(--color-text-muted); transition: transform .15s ease; }
+.as-caret-sm.open { transform: rotate(180deg); }
+
+/* 展开态：这一条到底引了什么原文 */
+.as-detail {
+  padding: 7px 10px 9px; border-top: 1px dashed var(--color-border);
+  background: var(--color-surface);
+}
+.as-path { font-size: 10.5px; color: var(--color-text-muted); margin-bottom: 4px; }
+.as-content {
+  font-size: 11.5px; line-height: 1.7; color: var(--color-text-sub);
+  max-height: 180px; overflow-y: auto; white-space: pre-wrap;
+}
+.as-file { font-size: 10.5px; color: var(--color-text-muted); margin-top: 5px; font-family: var(--font-mono); }
 
 .agent-view { display:flex; height:100%; overflow:hidden; background:var(--color-bg); }
 .task-panel { width:300px; flex-shrink:0; background:var(--color-surface); border-right:1px solid var(--color-border); display:flex; flex-direction:column; overflow-y:auto; }
@@ -221,6 +318,17 @@ onMounted(() => agentStore.loadMeta())
 .task-time  { font-size:11px; color:var(--color-text-muted); }
 .task-duration { font-size:11px; color:var(--color-success); font-weight:600; }
 .task-desc { font-size:14px; font-weight:500; color:var(--color-text); line-height:1.6; }
+.task-narration {
+  margin: var(--space-md) var(--space-lg) 0;
+  padding: 6px 10px; font-size: 11.5px; line-height: 1.6; color: var(--color-text-muted);
+  background: var(--color-bg); border-left: 3px solid var(--color-border);
+  border-radius: var(--radius-sm); white-space: pre-wrap;
+}
+.task-notice {
+  margin: var(--space-md) var(--space-lg) 0;
+  padding: 6px 10px; font-size: 11.5px; line-height: 1.6; color: #b45309;
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--radius-sm);
+}
 .steps-list { padding:var(--space-md) var(--space-lg); display:flex; flex-direction:column; gap:8px; }
 .thinking-hint { display:flex; align-items:center; gap:10px; padding:var(--space-md) var(--space-lg); font-size:13px; color:var(--color-text-muted); }
 .final-answer { padding:var(--space-md) var(--space-lg) var(--space-lg); border-top:1px solid var(--color-border-light); }

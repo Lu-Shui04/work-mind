@@ -52,6 +52,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _record_embedding_usage(chars: int, started: float, doc) -> None:
+    """把一次入库的向量化用量记到看板（feature=knowledge）。
+
+    embedding 接口不回 usage（OpenAIEmbeddings 只给向量），所以按字符估算并标记
+    estimated=True —— 看板上会显示成"估算"。不记的话，一篇几百页的文档入库
+    在看板上是 ¥0，用户会以为"知识库不花钱"，而它其实是调用量最大的一块。
+    """
+    from app.routes.monitor import record_api_call
+    from app.utils.tokens import estimate_tokens_from_chars
+
+    if chars <= 0:
+        return
+    record_api_call(
+        feature="knowledge",
+        input_tokens=estimate_tokens_from_chars(chars),  # 见 utils/tokens.py 的估算口径
+        output_tokens=0,
+        latency_ms=round((time.time() - started) * 1000),
+        tenant_id=getattr(doc, "tenant_id", "") or "",
+        user_id=getattr(doc, "created_by", "") or "",
+        estimated=True,
+    )
+
+
 def sha256_of(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -412,12 +435,17 @@ async def ingest_document(
         if not embeddings:
             raise ValueError("未配置 ZHIPU_API_KEY / OPENAI_API_KEY，无法向量化")
 
+        _embed_started = time.time()
+        embedded_chars = 0
         for i in range(0, len(chunks), EMBED_BATCH_SIZE):
             batch = chunks[i:i + EMBED_BATCH_SIZE]
-            vectors = await embeddings.aembed_documents([c.text for c in batch])
+            texts = [c.text for c in batch]
+            vectors = await embeddings.aembed_documents(texts)
             for chunk, vec in zip(batch, vectors):
                 chunk.embedding = vec
+            embedded_chars += sum(len(t) for t in texts)
             logger.info("rag: embedding progress", {"docId": doc.doc_id, "done": min(i + EMBED_BATCH_SIZE, len(chunks)), "total": len(chunks)})
+        _record_embedding_usage(embedded_chars, _embed_started, doc)
 
         # 4) 维度校验：换 embedding 模型后维度会变（智谱 embedding-3 = 2048），
         #    与表的向量列不一致时给出可行动的报错，而不是让 pgvector 抛"expected N dimensions"
@@ -495,11 +523,16 @@ async def reindex_document(doc_id: str, user) -> DocumentRecord:
         element_count=len(parsed.elements), char_count=parsed.char_count,
     )
     chunks = build_chunks(doc, parsed.elements)
+    _embed_started = time.time()
+    embedded_chars = 0
     for i in range(0, len(chunks), EMBED_BATCH_SIZE):
         batch = chunks[i:i + EMBED_BATCH_SIZE]
-        vectors = await embeddings.aembed_documents([c.text for c in batch])
+        texts = [c.text for c in batch]
+        vectors = await embeddings.aembed_documents(texts)
+        embedded_chars += sum(len(t) for t in texts)
         for chunk, vec in zip(batch, vectors):
             chunk.embedding = vec
+    _record_embedding_usage(embedded_chars, _embed_started, doc)
     await get_vector_store().add(chunks)
     await registry.update(doc_id, chunk_count=len(chunks), ingest_status=IngestStatus.indexed.value,
                     indexed_at=_now_iso(), ingest_error=None,

@@ -121,6 +121,9 @@ watch(() => identity.version, () => knStore.loadStats())
   border-radius: var(--radius-lg); padding: 12px;
   flex-shrink: 0;
 }
-.card.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+/* flex:1 里含 flex-shrink:1 + flex-basis:0 —— 左栏空间不够时这张卡会被压到 20 多像素，
+   里面的文档列表既看不见、也不会让左栏滚动（实测 1280x800 下就只有 24px 高）。
+   改成"能撑大但不许压扁"：有空间就填满，没空间就保持自身高度，交给 .left 去滚。 */
+.card.grow { flex: 1 0 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
 .card-title { font-size: 13px; font-weight: 600; color: var(--color-text); }
 </style>

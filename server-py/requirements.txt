@@ -11,3 +11,6 @@ pypdf>=4.3.0
 httpx>=0.27.0
 # 知识库持久化：PostgreSQL + pgvector（asyncpg 直接走 SQL，过滤条件下推）
 asyncpg>=0.29.0
+# 时区数据库：slim 镜像本身不带 /usr/share/zoneinfo，
+# 而 date 工具要靠 zoneinfo 按 APP_TIMEZONE 算"今天"（否则会退回 UTC，日期差一天）
+tzdata>=2024.1

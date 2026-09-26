@@ -30,6 +30,9 @@ async def run(body: dict, user: User = Depends(current_user)):
     if use_knowledge is not None:
         use_knowledge = bool(use_knowledge)
 
+    # 会话 id：Agent 要靠它记住"上一个任务说了什么"（摘要 + 最近 N 轮，见 chat/memory.py）
+    session_id = (body.get("sessionId") or "agent-default").strip() or "agent-default"
+
     async def generator():
         queue: asyncio.Queue = asyncio.Queue()
         usage: dict = {}
@@ -41,10 +44,12 @@ async def run(body: dict, user: User = Depends(current_user)):
                 usage.update(data or {})
             await queue.put((event_type, data))
 
-        yield "start", {"task": task, "timestamp": datetime.now(timezone.utc).isoformat()}
+        yield "start", {"task": task, "sessionId": session_id,
+                        "timestamp": datetime.now(timezone.utc).isoformat()}
 
         # run_agent 内部总会以 'done' 或 'error' 事件结束
-        run_task = asyncio.create_task(run_agent(task, on_event, user, use_knowledge))
+        run_task = asyncio.create_task(
+            run_agent(task, on_event, user, use_knowledge, session_id=session_id))
 
         while True:
             event_type, data = await queue.get()

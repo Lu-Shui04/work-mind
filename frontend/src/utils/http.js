@@ -25,6 +25,9 @@ http.interceptors.request.use(
 http.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    // silent：后台轮询（看板这类）失败时由调用方自己处理，不要每几秒弹一次 toast
+    if (error.config?.silent) return Promise.reject(error)
+
     const appStore = useAppStore()
 
     if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
@@ -99,16 +102,19 @@ export async function fetchStream(url, body, { onToken, onEvent, onDone, onError
         let data
         try { data = JSON.parse(dataStr) } catch { continue }
 
-        // 分发事件
-        if (event === 'token' && onToken) {
-          onToken(data.token || '')
-        } else if (event === 'done' && onDone) {
-          onDone(data)
-        } else if (event === 'error') {
+        // 分发事件：onToken / onDone / onError 是**便捷回调**，不是"这个事件就不用给 onEvent 了"。
+        // 以前写成 else-if，结果是：只要 store 注册了 onDone，onEvent 里的
+        // `if (event === 'done')` 分支就永远不执行 —— 实测因此静默丢过三样东西：
+        //   1) A/B 对比的评分结果（页面跑完却不显示谁赢）
+        //   2) Agent 的"已达最大步数"提示（maxStepsReached 拿不到）
+        //   3) Prompt 单测的耗时 / token / 费用统计
+        // 所以这里改成：事件一律先给 onEvent，再单独回调便捷函数。
+        if (event === 'token') onToken?.(data.token || '')
+        if (event === 'done')  onDone?.(data)
+        onEvent?.(event, data)
+        if (event === 'error') {
           onError?.(new Error(data.message || '流式请求出错'))
           return
-        } else if (onEvent) {
-          onEvent(event, data)
         }
       }
     }

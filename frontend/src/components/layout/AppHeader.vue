@@ -25,13 +25,19 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMonitorStore } from '@/stores/monitor.js'
 import IdentitySwitcher from '@/components/layout/IdentitySwitcher.vue'
 
 const route = useRoute()
 const monitorStore = useMonitorStore()
+
+// 预算预警要跟着后端走：以前它读的是前端自己累加的计数器（只统计对话、刷新即归零），
+// 所以"今日用量已达 …"这条横幅实际上永远不会出现。现在顶部栏按固定间隔
+// 拉一次真实用量（失败静默），任何页面都能看到预警。
+onMounted(() => monitorStore.start(20000))
+onUnmounted(() => monitorStore.stop())
 
 // 各页面的标题和描述（icon 使用 Element Plus 图标名）
 const pageMeta = {

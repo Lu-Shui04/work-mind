@@ -16,6 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import ValidationError
 
 from app.schemas.document import (
@@ -54,6 +55,21 @@ _STATUS_LABELS = {"active": "生效中", "superseded": "已被替代", "archived
 
 async def _visible_docs(user: User) -> list:
     return [d for d in await registry.list_docs(user.tenant_id) if can_view(d, user)]
+
+
+def _record_knowledge_usage(handler, started: float, user: User) -> None:
+    """把一次知识库的模型调用记到用量看板（feature=knowledge）。
+
+    以前知识库一次都不记账，看板上根本看不到"RAG 知识库"这个功能 ——
+    而它（检索 + 重排 + AI 预填）恰恰是调用量最大的一块。
+    """
+    from app.routes.monitor import record_api_call
+    from app.utils.tokens import sum_usage
+
+    input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    record_api_call(feature="knowledge", input_tokens=input_tokens, output_tokens=output_tokens,
+                    latency_ms=round((time.time() - started) * 1000),
+                    tenant_id=user.tenant_id, user_id=user.user_id)
 
 
 def _metadata_diff(existing: DocumentRecord, metadata: DocumentMetadata) -> list[str]:
@@ -167,6 +183,9 @@ async def suggest_metadata(body: dict, user: Annotated[User, Depends(current_use
         tags: list[str] = Field(default_factory=list, description="2-4 个标签")
         reason: str = Field(description="判断依据，一句话")
 
+    # 用量记账：结构化输出拿不到 usage，用回调处理器收真实 token（看板上的"RAG 知识库"）
+    handler = UsageMetadataCallbackHandler()
+    started = time.time()
     model = create_chat_model(temperature=0, streaming=False)
     try:
         result = await model.with_structured_output(Suggestion, method="function_calling").ainvoke([
@@ -176,10 +195,13 @@ async def suggest_metadata(body: dict, user: Annotated[User, Depends(current_use
                 "推断不出部门就用 general，不要编造具体数字。"
             )},
             {"role": "user", "content": f"文件名：{file_name}\n正文片段：\n{snippet}"},
-        ])
+        ], config={"callbacks": [handler]})
     except Exception as err:
+        _record_knowledge_usage(handler, started, user)
         logger.error("knowledge: metadata suggest failed", {"error": str(err)})
         raise HTTPException(status_code=500, detail={"error": {"message": "AI 预填失败，请手动填写"}})
+
+    _record_knowledge_usage(handler, started, user)
 
     data = result.model_dump()
     # 归一化：模型可能返回不在枚举里的值，统一兜底，保证前端表单能直接用

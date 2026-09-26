@@ -41,6 +41,16 @@ export const useAgentStore = defineStore('agent', () => {
   const tasks    = ref([])
   const running  = ref(false)
 
+  // ── 会话 id：Agent 的上下文记忆是按会话存的 ──────────────────
+  // 后端会用「摘要 + 最近 10 轮」记住这个会话里之前做过什么任务，
+  // 所以下一次任务可以说"再算一下刚才那个"。
+  // 持久化到 localStorage：刷新页面不该把记忆切断。
+  const SESSION_KEY = 'workmind.agent.session'
+  const newSessionId = () =>
+    'agent-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  const sessionId = ref(localStorage.getItem(SESSION_KEY) || newSessionId())
+  localStorage.setItem(SESSION_KEY, sessionId.value)
+
   // 当前正在执行的任务状态（实时更新）
   const currentTask = ref(null)
 
@@ -62,7 +72,12 @@ export const useAgentStore = defineStore('agent', () => {
       task:      taskText,
       steps:     [],         // 工具调用步骤数组
       answer:    '',         // 最终回答
+      // 过程说明：调用工具之前模型吐出来的话（"我先查一下…"）。
+      // 不单独存的话会被当成回答拼进最终结果，出现 "…report.Let me get more…" 这种串行文本。
+      narration: '',
       status:    'running',  // running | done | error
+      // 是否因为"步数用尽"被强制收尾（界面上要提示回答可能不完整）
+      maxStepsReached: false,
       // 意图路由与知识库引用（Agent 已与知识库打通）
       intent:    null,
       sources:   [],
@@ -72,13 +87,17 @@ export const useAgentStore = defineStore('agent', () => {
       duration:  0,
     })
 
-    tasks.value.unshift(task)
+    // 新任务追加在**末尾**：任务列表是"按时间往下读"的执行流水，
+    // 新的在上面会让刚发起的那次任务顶到最上面，得回头往下找历史，
+    // 也不符合"输入框在左上、结果往下滚"的阅读顺序。
+    tasks.value.push(task)
     currentTask.value = task
 
     await fetchStream(
       '/api/agent/run',
       // useKnowledge: undefined=自动（后端默认"召回优先"）/ true=强制检索 / false=关闭
-      { task: taskText, useKnowledge: options.useKnowledge },
+      // sessionId: 后端按会话保存记忆（摘要 + 最近 10 轮），下次任务能接着说
+      { task: taskText, useKnowledge: options.useKnowledge, sessionId: sessionId.value },
       {
         onToken: (token) => {
           task.answer += token
@@ -100,8 +119,27 @@ export const useAgentStore = defineStore('agent', () => {
             task.recall   = data.recall || null
           }
 
+          // 后端的权威判定：刚刚流式吐出来的内容其实是"过程说明"（这条模型消息紧接着要调工具），
+          // 不是最终回答 —— 挪到 narration，避免它冒充答案。
+          // 为什么不能只靠下面的 tool_call 事件：步数用尽时会强制走收尾分支，
+          // 那一步的 tool_calls 不会执行，也就不会再有 tool_call 事件（真实踩过：
+          // 用户看到的"最终回答"是模型一句 "I have enough information now..."）。
+          if (event === 'answer_reset') {
+            const text = task.answer.trim()
+            if (text) {
+              task.narration = task.narration ? task.narration + '\n' + text : text
+              task.answer = ''
+            }
+          }
+
           // 工具被调用：记录步骤
           if (event === 'tool_call') {
+            // 走到"要调工具"这一步，说明前面已经吐出来的内容只是过程说明，不是最终回答。
+            // 把它挪到 narration，避免和最终回答拼在一起。
+            if (task.answer.trim()) {
+              task.narration = task.narration ? task.narration + '\n' + task.answer.trim() : task.answer.trim()
+              task.answer = ''
+            }
             task.steps.push({
               id:       task.steps.length + 1,
               toolName: data.toolName,
@@ -126,6 +164,8 @@ export const useAgentStore = defineStore('agent', () => {
           if (event === 'done') {
             task.status   = 'done'
             task.duration = Date.now() - startTime
+            // 步数用尽时后端会强制收尾，回答是基于已有信息的总结，要在界面上说明
+            task.maxStepsReached = !!data.maxStepsReached
             currentTask.value = null
           }
 
@@ -155,13 +195,18 @@ export const useAgentStore = defineStore('agent', () => {
     running.value = false
   }
 
-  function clearTasks() {
+  async function clearTasks() {
     tasks.value = []
     currentTask.value = null
+    // 清空任务列表 = 开一段新对话：顺手把后端的会话记忆也清掉，
+    // 否则下一个任务还会"记得"清空之前聊过的东西
+    try { await http.delete('/chat/sessions/' + sessionId.value) } catch { /* 清不掉不影响使用 */ }
+    sessionId.value = newSessionId()
+    localStorage.setItem(SESSION_KEY, sessionId.value)
   }
 
   return {
-    toolList, examples,
+    toolList, examples, sessionId,
     tasks, running, currentTask,
     loadMeta, runTask, clearTasks,
   }

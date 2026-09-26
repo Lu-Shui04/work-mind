@@ -1,34 +1,75 @@
 // frontend/src/stores/monitor.js
-// 成本监控 store（第七章完整实现，这里先放基础结构）
+// 用量看板的全局状态：数据**全部来自后端** /api/monitor/stats（PostgreSQL 聚合）。
+//
+// 以前这里是个"前端自己算"的计数器：recordCall() 在浏览器里按 token 累加费用，
+// 刷新页面就归零、只统计对话、别的模块（知识库/工作流/Agent/ERP）一概不算；
+// 顶部那条"今日用量已达 …，请注意控制"的预警读的就是它，
+// 所以**从来没出现过**——看板和后端各算各的，等于这个模块跟系统是断开的。
+//
+// 现在统一成一个来源：后端每次模型调用落一行 usage_calls，前端只负责读和展示。
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
+import http from '@/utils/http.js'
 
 export const useMonitorStore = defineStore('monitor', () => {
-  const dailyBudget = ref(50)     // ¥50 日预算
-  const todaySpend  = ref(0)      // 今日消费（¥）
-  const totalCalls  = ref(0)      // 总调用次数
-  const cacheHits   = ref(0)      // 缓存命中次数
+  const overview = ref({})
+  const latency = ref({})
+  const byFeature = ref([])
+  const last7Days = ref([])
+  const recentCalls = ref([])
+  const cacheStats = ref({})
+  const loaded = ref(false)
+  const error = ref('')
 
-  // 超过日预算 80% 时触发预警
+  const dailyBudget = computed(() => overview.value?.dailyBudget ?? 50)
+  const todaySpend = computed(() => overview.value?.costCNYToday ?? 0)
+
+  // 超过日预算 80% 时预警（顶部横幅用）
   const budgetWarning = computed(() => {
-    const ratio = todaySpend.value / dailyBudget.value
-    if (ratio >= 0.8) {
-      return `¥${todaySpend.value.toFixed(2)} / ¥${dailyBudget.value}`
-    }
-    return null
+    const pct = overview.value?.budgetUsedPct ?? 0
+    if (pct < 80) return null
+    return '¥' + todaySpend.value.toFixed(2) + ' / ¥' + dailyBudget.value
   })
 
-  // 记录一次 API 调用
-  function recordCall({ inputTokens = 0, outputTokens = 0, fromCache = false, feature = 'chat' }) {
-    totalCalls.value++
-    if (fromCache) {
-      cacheHits.value++
-      return
-    }
-    // 按 DeepSeek 价格估算：输入 $0.27/M，输出 $1.10/M，汇率 7.2
-    const usd = (inputTokens / 1e6 * 0.27) + (outputTokens / 1e6 * 1.10)
-    todaySpend.value += usd * 7.2
+  function apply(d) {
+    if (!d || typeof d !== 'object') return
+    overview.value = d.overview || {}
+    latency.value = d.latency || {}
+    byFeature.value = d.byFeature || []
+    last7Days.value = d.last7Days || []
+    recentCalls.value = d.recentCalls || []
+    cacheStats.value = d.cacheStats || {}
+    loaded.value = true
+    error.value = ''
   }
 
-  return { dailyBudget, todaySpend, totalCalls, cacheHits, budgetWarning, recordCall }
+  async function refresh() {
+    try {
+      // silent：轮询失败不要每 15 秒弹一次 toast（后端没起来时尤其吵）
+      const d = await http.get('/monitor/stats', { silent: true })
+      apply(d)
+      return d
+    } catch (err) {
+      error.value = err?.message || '看板数据加载失败'
+      return null
+    }
+  }
+
+  // 轮询：看板要"跟着系统走"，跑完一次对话回来就能看到新数字
+  let timer = null
+  function start(intervalMs = 15000) {
+    if (timer) return
+    refresh()
+    timer = setInterval(refresh, intervalMs)
+  }
+  function stop() {
+    if (timer) clearInterval(timer)
+    timer = null
+  }
+
+  return {
+    overview, latency, byFeature, last7Days, recentCalls, cacheStats,
+    loaded, error, dailyBudget, todaySpend, budgetWarning,
+    apply, refresh, start, stop,
+  }
 })

@@ -1,13 +1,30 @@
 # server-py/app/services/erp/parser.py
 # 自然语言 → 结构化表单：用结构化输出解析用户的口语化描述
+import time
 from datetime import date, datetime, timedelta
 from typing import Literal
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
 from app.services.model import create_chat_model
+from app.utils.tokens import sum_usage
 
 _model = create_chat_model(temperature=0)
+
+
+def _record_parse_usage(handler: UsageMetadataCallbackHandler, started: float) -> dict:
+    """把"自然语言 → 表单"这次模型调用的用量记到看板（feature=erp）。
+
+    以前 erp 的 /parse 记的是 input_tokens=0/output_tokens=0 —— 调用次数对、
+    费用永远是 ¥0，看板上的"ERP 审批"因此完全没有参考价值。
+    """
+    from app.routes.monitor import record_api_call
+
+    input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    record_api_call(feature="erp", input_tokens=input_tokens, output_tokens=output_tokens,
+                    latency_ms=round((time.time() - started) * 1000))
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens}
 
 
 # ── 报销申请解析 ──────────────────────────────────────────────
@@ -31,6 +48,8 @@ class ExpenseForm(BaseModel):
 async def parse_expense_form(text: str) -> dict:
     today = date.today().isoformat()
 
+    handler = UsageMetadataCallbackHandler()
+    started = time.time()
     extract_model = _model.with_structured_output(ExpenseForm, method="function_calling")
     result: ExpenseForm = await extract_model.ainvoke([
         {
@@ -45,8 +64,9 @@ async def parse_expense_form(text: str) -> dict:
 5. totalAmount 等于所有 items 的 amount 之和""",
         },
         {"role": "user", "content": text},
-    ])
+    ], config={"callbacks": [handler]})
 
+    _record_parse_usage(handler, started)
     return result.model_dump()
 
 
@@ -78,6 +98,8 @@ def _count_workdays(start_str: str, end_str: str) -> int:
 async def parse_leave_form(text: str) -> dict:
     today = date.today().isoformat()
 
+    handler = UsageMetadataCallbackHandler()
+    started = time.time()
     extract_model = _model.with_structured_output(LeaveForm, method="function_calling")
     result: LeaveForm = await extract_model.ainvoke([
         {
@@ -92,8 +114,9 @@ async def parse_leave_form(text: str) -> dict:
 5. 产假/婚假要在 warnings 里提示需要提供相关证明材料""",
         },
         {"role": "user", "content": text},
-    ])
+    ], config={"callbacks": [handler]})
 
+    _record_parse_usage(handler, started)
     data = result.model_dump()
     # 自动计算工作日（补充模型可能算错的情况）
     if data.get("startDate") and data.get("endDate"):

@@ -73,10 +73,17 @@ export const usePromptStore = defineStore('prompt', () => {
   }
 
   // ── A/B 测试状态 ────────────────────────────────────────────
+  // 预置一组默认内容，打开页面直接点「开始对比」就能出结果 ——
+  // 面试官翻作品集时不用先自己想问题、也不用先写 prompt。
+  const AB_SAMPLE = {
+    question:      '学习一个新知识最快的方法是什么',
+    systemPromptA: '输出格式：\n1.xxx\n2.xxx\n3.xxx',
+    systemPromptB: '输出格式：\n大白话解释',
+  }
   const abConfig = reactive({
-    question:      '',
-    systemPromptA: '',
-    systemPromptB: '',
+    question:      AB_SAMPLE.question,
+    systemPromptA: AB_SAMPLE.systemPromptA,
+    systemPromptB: AB_SAMPLE.systemPromptB,
     temperature:   0,
     maxTokens:     800,
   })
@@ -88,6 +95,8 @@ export const usePromptStore = defineStore('prompt', () => {
   })
 
   const abTesting = ref(false)
+  // 生成完了、正在跑评分（评分要读完整答案，是 A/B 里最后一段等待）
+  const abScoring = ref(false)
 
   async function runAbTest() {
     if (!abConfig.question.trim() || abTesting.value) return
@@ -96,22 +105,44 @@ export const usePromptStore = defineStore('prompt', () => {
     abResult.answerB    = ''
     abResult.evaluation = null
 
-    try {
-      const data = await http.post('/prompt/ab-test', {
+    // 流式：两个变体并行生成，token 各自追加到自己那一列（以前是等 5 次调用全跑完才出结果）
+    await fetchStream(
+      '/api/prompt/ab-test/stream',
+      {
         question:      abConfig.question,
         systemPromptA: abConfig.systemPromptA,
         systemPromptB: abConfig.systemPromptB,
         temperature:   abConfig.temperature,
         maxTokens:     abConfig.maxTokens,
-      })
-      abResult.answerA    = data.answerA
-      abResult.answerB    = data.answerB
-      abResult.evaluation = data.evaluation
-    } catch (err) {
-      appStore.toast.error('A/B 测试失败，请重试')
-    } finally {
-      abTesting.value = false
-    }
+      },
+      {
+        onEvent: (event, data) => {
+          if (event === 'token') {
+            if (data.variant === 'a') abResult.answerA += data.token
+            else abResult.answerB += data.token
+          }
+          if (event === 'variant_error') {
+            appStore.toast.error(`变体 ${data.variant.toUpperCase()} 生成失败：${data.message}`)
+          }
+          if (event === 'scoring') {
+            abScoring.value = true
+          }
+        },
+        onDone: (data) => {
+          // done 事件带着最终的答案与评分
+          abResult.answerA    = data?.answerA || abResult.answerA
+          abResult.answerB    = data?.answerB || abResult.answerB
+          abResult.evaluation = data?.evaluation || null
+          abTesting.value = false
+          abScoring.value = false
+        },
+        onError: (err) => {
+          abTesting.value = false
+          abScoring.value = false
+          appStore.toast.error(err.message || 'A/B 测试失败，请重试')
+        },
+      },
+    )
   }
 
   // ── 模板管理 ────────────────────────────────────────────────
@@ -174,7 +205,7 @@ export const usePromptStore = defineStore('prompt', () => {
 
   return {
     testConfig, testResult, testing,
-    abConfig, abResult, abTesting,
+    abConfig, abResult, abTesting, abScoring,
     templates, editingId,
     runTest, runAbTest,
     loadTemplates, applyTemplate, applyAbTemplate,

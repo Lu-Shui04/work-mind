@@ -19,6 +19,7 @@ C. **未命中必须能自证原因**：返回 kb_empty / all_filtered / below_t
    最高分、候选数、阈值，前端分开显示，不用再翻代码猜。
 """
 import os
+import time
 
 from langchain_core.prompts import ChatPromptTemplate
 
@@ -39,12 +40,40 @@ SIMILARITY_MARGIN = float(os.getenv("RAG_SIMILARITY_MARGIN", "0"))
 # 返回条数：4 条对"制度问答"偏少，容易刚好漏掉答案所在的那片
 DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
 
-# 检索不到内容时怎么回答：
-#   grounded（默认，知识优先）—— 明确说"知识库中未找到相关内容"，**不调用模型**，
-#                                也就不会拿模型自身知识去顶，避免与公司资料口径不一致；
-#   fallback（旧的）           —— 没有资料就交给模型凭自身知识正常回答。
-# 想要"先查库、命中就用、没命中照常答"就设成 fallback。
-ANSWER_POLICY = (os.getenv("RAG_ANSWER_POLICY", "grounded") or "grounded").lower()
+# 检索不到内容、且用户没强制只用知识库时怎么回答（**只影响"自动"模式**）：
+#   fallback（默认）—— 先明确说明"知识库未命中"，然后**照常用通用知识回答**。
+#                      用户要的是"别拿一句没找到把人堵死"，所以这是默认行为；
+#   grounded（严格）—— 明确说"知识库中未找到相关内容"，**不调用模型**，
+#                      不拿模型自身知识去顶，避免与公司资料口径不一致。
+#
+# ⚠️ 用户在前端选「强制检索」时不看这个开关：强制就是只依据知识库，查不到就说查不到。
+#    选「关闭」则压根不检索，直接回答（不会出现任何"未找到"话术）。
+ANSWER_POLICY = (os.getenv("RAG_ANSWER_POLICY", "fallback") or "fallback").lower()
+
+
+def resolve_knowledge_mode(use_knowledge: bool | None, need: bool,
+                           sources: list, policy: str | None = None) -> str:
+    """知识库三态语义的**唯一裁决处**：这次该怎么作答。
+
+    返回值：
+      no_retrieval    —— 用户选了「关闭」：压根没查库，直接用通用知识回答
+                         （不会出现任何"未找到"话术）
+      grounded_answer —— 查到资料：只依据资料回答，并标注引用
+      grounded_miss   —— 「强制」或部署方显式要求严格：只回"未找到"，不许用通用知识补充
+      fallback_miss   —— 「自动」且库里没有：先说明未命中，再用通用知识回答
+
+    为什么单独抽出来：这三条规则原来散在路由的 if 里，容易出现
+    "用户选了关闭却还回一句知识库未找到"这种自相矛盾的行为。集中一处才好测。
+    """
+    if not need:
+        return "no_retrieval"
+    if sources:
+        return "grounded_answer"
+    if use_knowledge is True:
+        return "grounded_miss"
+    if (policy or ANSWER_POLICY).lower() == "grounded":
+        return "grounded_miss"
+    return "fallback_miss"
 
 
 def no_knowledge_reply(recall: dict | None = None) -> str:
@@ -71,6 +100,12 @@ def no_knowledge_reply(recall: dict | None = None) -> str:
         best, cutoff = r.get("bestScore"), r.get("threshold")
         lines.append(f"检索情况：有 {r.get('candidates', 0)} 条候选片段，但最高相似度 "
                      f"{best} 低于阈值 {cutoff}，没有足够的依据作答。")
+    elif reason == "rerank_rejected":
+        rk = r.get("rerank") or {}
+        lines.append(f"检索情况：召回了 {r.get('candidates', 0)} 条候选片段，它们"
+                     f"主题上沾边、但都回答不了这个具体问题（重排最高相关性 "
+                     f"{rk.get('topScore')}，低于下限 {rk.get('minScore')}），已全部丢弃，"
+                     "所以不作为依据。")
     elif reason == "all_filtered":
         lines.append("检索情况：知识库里确实有内容，但都被权限或版本条件过滤掉了"
                      "（可在右上角切换身份验证，或检查文档的归属部门 / 密级 / 生效日期）。")
@@ -86,8 +121,7 @@ def no_knowledge_reply(recall: dict | None = None) -> str:
                  "· 换个更具体的说法再问一次（尽量用文档里出现过的词）\n"
                  "· 到「知识库」页确认这份资料已入库、并且已生效\n"
                  "· 如果这个问题本来就不需要公司资料，把输入框下方的「知识库」切到「关闭」，"
-                 "我就用通用知识回答；想让「查不到也照常答」成为默认，"
-                 "把后端 RAG_ANSWER_POLICY 设为 fallback")
+                 "我就直接用通用知识回答")
     return "\n\n".join(lines)
 
 
@@ -140,6 +174,39 @@ def _cutoff(best: float | None) -> float:
 
 async def retrieve_with_meta(question: str, user: User, k: int | None = None,
                              filters: SearchFilters | None = None) -> tuple[list[dict], dict]:
+    """检索入口（对外唯一名字）：顺带把这次检索的用量记到看板上。
+
+    为什么记在这里、而不是让每个调用方各记一遍：对话（带知识库）、知识库检索页、
+    Agent 的 read_doc 全都走这个函数 —— **记在这里才不会漏**。
+    以前一次都不记，看板上根本看不到"RAG 知识库"这个功能，而它恰恰是
+    调用量最大的一块（query 向量化 + 每次检索一次 LLM 重排）。
+    """
+    started = time.time()
+    rerank_usage: dict = {}
+    hits, meta = await _retrieve_with_meta(question, user, k=k, filters=filters,
+                                           rerank_usage=rerank_usage)
+
+    from app.routes.monitor import record_api_call
+    from app.utils.tokens import estimate_tokens
+
+    # query 向量化：embedding 接口不回 usage，按字符估算（estimated=True）
+    input_tokens = estimate_tokens(question) + int(rerank_usage.get("input_tokens") or 0)
+    output_tokens = int(rerank_usage.get("output_tokens") or 0)
+    # 只要有一段数字是估的，整条记录就标成"估算"；重排拿到真实 usage 时才是账实
+    estimated = bool(rerank_usage.get("estimated", True)) if rerank_usage else True
+    record_api_call(
+        feature="knowledge",
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        latency_ms=round((time.time() - started) * 1000),
+        tenant_id=user.tenant_id, user_id=user.user_id,
+        estimated=estimated,
+    )
+    return hits, meta
+
+
+async def _retrieve_with_meta(question: str, user: User, k: int | None = None,
+                              filters: SearchFilters | None = None,
+                              rerank_usage: dict | None = None) -> tuple[list[dict], dict]:
     """检索并返回 (命中切片, 诊断信息)。诊断信息用于回答"为什么没命中"。"""
     filters = filters or SearchFilters()
     k = k or DEFAULT_TOP_K
@@ -205,19 +272,42 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
     # 这一步是 Top1 准确率的主要来源。失败就保留向量序（fail-open），不影响可用性。
     rerank_meta: dict = {"applied": False, "provider": rerank.PROVIDER, "pool": pool_k}
     if rerank.is_enabled() and len(hits) > 1:
-        scores = await rerank.rerank(question, [h["content"] for h in hits])
+        # usage_out：让重排把这次调用的用量回填出来（LLM 重排是真实 token，见 rerank.py）
+        scores = await rerank.rerank(question, [h["content"] for h in hits],
+                                     usage_out=rerank_usage)
         if scores:
             for h, s in zip(hits, scores):
                 h["rerankScore"] = round(s, 3)
             hits.sort(key=lambda h: (-(h.get("rerankScore") if h.get("rerankScore") is not None else -1),
                                      -h["score"]))
-            rerank_meta.update({"applied": True, "candidates": len(scores)})
+            rerank_meta.update({"applied": True, "candidates": len(scores),
+                                "minScore": rerank.MIN_SCORE})
+
+    # ── 重排下限过滤：重排说"回答不了这个问题"的，直接不要 ──────────────
+    # 只排序不过滤的话，6 条"主题沾边"的噪音照样算命中，Agent 会据此
+    # 认为知识库有答案而锁死在知识分支（一句"未找到"就结束，工具没机会执行）。
+    # 重排失败时（scores=None）不启用过滤，保持 fail-open，不让重排把检索搞挂。
+    if rerank_meta.get("applied") and rerank.MIN_SCORE > 0:
+        rerank_meta["topScore"] = max((h.get("rerankScore") or 0) for h in hits) if hits else 0
+        kept = [h for h in hits if (h.get("rerankScore") or 0) >= rerank.MIN_SCORE]
+        rerank_meta["dropped"] = len(hits) - len(kept)
+        hits = kept
+
     hits = hits[:k]
 
     # ── 未命中原因诊断：把"没查到"翻译成人能直接行动的三类原因 ──────────
     candidates = sql_meta.get("candidates", 0)
+    # 召回有候选、但重排把它们全判成"回答不了"：这是假命中，要跟"库里没有"区分开，
+    # 否则用户看到的是"最高相似度 0.47 高于阈值 0.35，却说没找到"，完全说不通
+    rerank_rejected = bool(rerank_meta.get("applied")) and bool(rerank_meta.get("dropped")) and not hits
+
     if hits:
         reason, explain = "ok", f"命中 {len(hits)} 条"
+    elif rerank_rejected:
+        reason = "rerank_rejected"
+        explain = (f"召回 {rerank_meta.get('candidates', 0)} 条候选，但重排判断它们都回答不了这个问题"
+                   f"（最高相关性 {rerank_meta.get('topScore')}，低于下限 {rerank_meta.get('minScore')}），"
+                   "已全部丢弃")
     elif total == 0:
         reason = "kb_empty"
         explain = "知识库当前没有任何切片（未入库，或换库/重启后没有重新入库）"
