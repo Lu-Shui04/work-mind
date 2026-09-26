@@ -142,6 +142,33 @@ _model_with_tools = _agent_model.bind_tools(guarded_tools)
 _tool_node = ToolNode(guarded_tools)
 
 
+# 知识分支（knowledge_answer）只会"读文档 + 回答"：它**不会算数、也不会发通知/生成报告**。
+# 所以任务里一旦出现这类诉求，路由判成 knowledge 就等于把这些步骤**整段丢掉** ——
+# 实测就发生过：任务「查年假政策 + 按15天算我剩余天数 + 通知HR」被路由到知识分支，
+# 结果既没算数也没发通知，用户只拿到一段政策文字（评测集 agent-004 反复复现，
+# 三次运行里挂了两次）。这里给它一个**确定性**的硬信号，不再只靠模型判一次。
+#
+# 关键词取得偏保守（要"动作"而不是"名词"）：
+#   「报销制度里餐费标准怎么计算？」不该被当成计算任务，所以用「计算一下」而不是「计算」；
+#   「告诉我年假有几天」是纯提问，所以 notify 里不放「告诉」。
+_TOOL_CAPABILITY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("计算", ("算一下", "帮我算", "计算一下", "等于多少", "还剩多少", "还剩几",
+              "已用", "扣除", "合计", "总计", "换算成", "乘以", "除以")),
+    ("发送通知", ("通知", "发给", "发送给", "提醒", "告知")),
+    ("生成报告", ("生成报告", "写一份报告", "出一份", "生成一份", "整理成报告",
+                  "写周报", "会议纪要")),
+)
+
+
+def _tool_capability_need(task: str) -> str | None:
+    """任务是否要求"知识分支做不到"的能力；返回能力名（用于解释路由），否则 None。"""
+    text = task or ""
+    for capability, hints in _TOOL_CAPABILITY_HINTS:
+        if any(h in text for h in hints):
+            return capability
+    return None
+
+
 async def classify_task(task: str) -> _RouteDecision:
     try:
         return await _router_model.with_structured_output(_RouteDecision, method="function_calling").ainvoke([
@@ -480,6 +507,11 @@ async def run_agent(task: str, on_event, user: User | None = None,
         # 用户选了「强制检索」而库里没有：不能像"自动"那样把问题交还给通用知识，
         # 强制就是"只依据知识库作答"，查不到就说查不到（与智能对话的三态语义保持一致）。
         forced_miss = bool(need and source == "forced" and not pre_sources)
+        # ⚠️ 预检索到底有没有命中，必须在下面"清空 pre_sources"**之前**记下来。
+        #    之前在清空之后才算 kb_missed，于是"走了工具分支但库里其实有命中"的情况
+        #    会被误判成"库里没有"，回答以「知识库中没有查到相关内容」开头再自我纠正 ——
+        #    评测集用 agent-005 的 forbid_answer_phrases 抓到了这个潜在缺陷。
+        pre_hit = bool(pre_sources)
 
         if forced_miss:
             route = "knowledge"
@@ -491,10 +523,13 @@ async def run_agent(task: str, on_event, user: User | None = None,
                                         "recall": pre_recall})
         elif need and pre_sources:
             decision = await classify_task(task)
-            if decision.route == "tool":
+            capability = _tool_capability_need(task)
+            if decision.route == "tool" or capability:
                 route = "tool"
+                why = (f"任务还需要工具（{decision.reason}）" if decision.route == "tool"
+                       else f"任务需要「{capability}」，知识分支只会读文档回答、做不到")
                 route_reason = (f"{intent_reason}：命中 {len(pre_sources)} 条，"
-                                f"但任务还需要工具（{decision.reason}）→ 走工具分支")
+                                f"但{why} → 走工具分支")
                 search_query = decision.search_query or task
                 # 不把预检索结果当引用下发：这一分支由 read_doc 工具自己再检索一次，
                 # 否则前端会出现"引用了文档、最终回答却没用上"的错位
@@ -512,6 +547,11 @@ async def run_agent(task: str, on_event, user: User | None = None,
                 route_reason = f"已按召回优先检索知识库：{why} → {decision.reason}"
             else:
                 route_reason = f"{intent_reason} → {decision.reason}"
+            # 同上：任务要求"计算/通知/报告"这类知识分支做不到的能力时，硬性走工具分支
+            capability = _tool_capability_need(task)
+            if capability and route != "tool":
+                route = "tool"
+                route_reason += f"；任务需要「{capability}」，强制走工具分支"
             search_query = decision.search_query or task
             # 知识分支不会执行，这里把检索诊断直接推给前端（否则用户不知道为什么没走知识库）
             if need:
@@ -524,7 +564,7 @@ async def run_agent(task: str, on_event, user: User | None = None,
         # 把开场白带进图，保证最终回答第一句就是"知识库中没有查到相关内容"。
         # ⚠️ 必须在下面 trace_step / intent 事件之前算出来 —— 之前把它放在后面，
         #    结果 tracer 里引用它直接 UnboundLocalError，整个 Agent 任务当场挂掉。
-        kb_missed = bool(need) and not pre_sources and not forced_miss
+        kb_missed = bool(need) and not pre_hit and not forced_miss
         miss_text = miss_notice_text() if kb_missed else ""
 
         await on_event("intent", {
