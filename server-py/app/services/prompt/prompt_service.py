@@ -121,7 +121,7 @@ class _Comparison(BaseModel):
 
 
 async def score_ab_test(question: str, answer_a: str, answer_b: str) -> dict:
-    eval_model = _score_model.with_structured_output(_Evaluation)
+    eval_model = _score_model.with_structured_output(_Evaluation, method="function_calling")
 
     eval_a, eval_b = await asyncio.gather(
         eval_model.ainvoke([
@@ -134,7 +134,7 @@ async def score_ab_test(question: str, answer_a: str, answer_b: str) -> dict:
         ]),
     )
 
-    compare_model = _score_model.with_structured_output(_Comparison)
+    compare_model = _score_model.with_structured_output(_Comparison, method="function_calling")
     comparison: _Comparison = await compare_model.ainvoke([
         {"role": "system", "content": "比较两个回答，选出更好的那个。评分相差0.5分以内视为平局。"},
         {"role": "user", "content": f"""

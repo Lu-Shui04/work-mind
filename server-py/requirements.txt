@@ -9,3 +9,5 @@ langchain-text-splitters>=0.3.0
 langgraph>=0.2.0
 pypdf>=4.3.0
 httpx>=0.27.0
+# 知识库持久化：PostgreSQL + pgvector（asyncpg 直接走 SQL，过滤条件下推）
+asyncpg>=0.29.0

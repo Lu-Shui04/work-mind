@@ -2,9 +2,17 @@
 # 统一配置入口：所有环境变量从这里读取，业务代码不直接用 os.environ
 import os
 import sys
+from pathlib import Path
+
 from dotenv import load_dotenv
 
+# 【密钥统一管理】真实密钥只放**仓库根目录**的 .env（已被 .gitignore 忽略）：
+#   1) 先读当前工作目录的 .env（兼容 server-py/.env 的老用法，本地文件优先）
+#   2) 再读仓库根目录的 .env 作为兜底，且不覆盖已存在的变量
+# 这样 docker-compose（读根目录 .env）和直接跑 uvicorn 用的是同一份配置，
+# 不会出现"容器里能跑、本地跑不起来"或者"key 抄了两份、改了一处另一处没改"。
 load_dotenv()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 
 class _AppConfig:

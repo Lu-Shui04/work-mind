@@ -23,8 +23,6 @@ pnpm-debug.log*
 
 # Vector DB / uploads
 frontend/chroma/
-server/uploads/*
-!server/uploads/.gitkeep
 server-py/uploads/*
 !server-py/uploads/.gitkeep
 

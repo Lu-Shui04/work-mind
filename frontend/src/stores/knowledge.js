@@ -1,171 +1,244 @@
 // frontend/src/stores/knowledge.js
-// 知识库模块状态：文档列表、上传、问答
+// 知识库模块状态：文档资产管理（上传 / 元数据 / 列表 / 详情 / 删除 / 检索验证）。
+// 注意：知识库页面不再提供对话能力；检索能力由「智能对话」和「任务 Agent」消费。
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import http, { fetchStream } from '@/utils/http.js'
+import { ref, reactive } from 'vue'
+import http from '@/utils/http.js'
 import { useAppStore } from './app.js'
+import { useIdentityStore } from './identity.js'
 
 export const useKnowledgeStore = defineStore('knowledge', () => {
   const appStore = useAppStore()
+  const identity = useIdentityStore()
 
-  // ── 文档管理 ───────────────────────────────────────────────
-  const documents     = ref([])
-  const categories    = ref([])
-  const uploading     = ref(false)
-  const uploadProgress = ref(0)  // 0-100
+  // ── 字典与统计 ────────────────────────────────────────────────
+  const options = ref({ departments: [], docTypes: [], securityLevels: [], docStatuses: [], versions: [] })
+  const stats = ref({})
+  const loading = ref(false)
 
-  async function loadDocuments(category = '') {
-    const params = category ? `?category=${category}` : ''
-    const data = await http.get(`/knowledge/documents${params}`)
-    documents.value = data.documents
+  // ── 列表与筛选 ────────────────────────────────────────────────
+  const documents = ref([])
+  const filters = reactive({
+    department: '', docType: '', status: '', version: '', keyword: '', includeSuperseded: true,
+  })
+
+  // ── 上传 ──────────────────────────────────────────────────────
+  const uploading = ref(false)
+  const uploadProgress = ref(0)
+  const uploadStage = ref('')
+
+  // ── 详情 ──────────────────────────────────────────────────────
+  const selectedId = ref('')
+  const detail = ref(null)
+  const detailLoading = ref(false)
+
+  // ── 检索验证（工程工具：验证"权限 + 版本"过滤真的生效）─────────
+  const searchPreview = reactive({
+    question: '', loading: false, hits: [], diagnostics: null, appliedFilters: null, error: '',
+  })
+
+  function errMsg(err, fallback = '操作失败') {
+    return err?.response?.data?.error?.message || err?.message || fallback
   }
 
-  async function loadCategories() {
-    const data = await http.get('/knowledge/categories')
-    categories.value = data.categories
-  }
-
-  // 上传文件
-  async function uploadFile(file, { title, category }) {
-    uploading.value = true
-    uploadProgress.value = 0
-
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('title', title || file.name.replace(/\.[^.]+$/, ''))
-    formData.append('category', category || '通用')
-
+  async function loadOptions() {
     try {
-      // 用原生 XMLHttpRequest 监听上传进度（axios 也可以，用 onUploadProgress）
-      const result = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', '/api/knowledge/documents')
+      const data = await http.get('/knowledge/options')
+      options.value = data
+    } catch (err) { appStore.toast.error(errMsg(err, '加载字典失败')) }
+  }
 
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            uploadProgress.value = Math.round((e.loaded / e.total) * 80)
-          }
-        })
+  async function loadStats() {
+    try { stats.value = await http.get('/knowledge/stats') } catch { /* 统计失败不打断页面 */ }
+  }
 
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            uploadProgress.value = 100
-            resolve(JSON.parse(xhr.responseText))
-          } else {
-            reject(new Error(JSON.parse(xhr.responseText)?.error?.message || '上传失败'))
-          }
-        })
-
-        xhr.addEventListener('error', () => reject(new Error('网络错误')))
-        xhr.send(formData)
+  async function loadDocuments() {
+    loading.value = true
+    try {
+      const params = new URLSearchParams()
+      Object.entries(filters).forEach(([k, v]) => {
+        if (v !== '' && v !== null && v !== undefined) params.append(k, v)
       })
-
-      await loadDocuments()
-      await loadCategories()
-      appStore.toast.success(`「${result.document.title}」已成功入库，共 ${result.document.chunks} 个片段`)
-      return result.document
+      const data = await http.get(`/knowledge/documents?${params.toString()}`)
+      documents.value = data.documents || []
+      stats.value = { ...stats.value, visible: data.stats }
+      // 选中的文档被过滤掉了就清空详情，避免"详情与列表不一致"
+      if (selectedId.value && !documents.value.some(d => d.doc_id === selectedId.value)) {
+        selectedId.value = ''; detail.value = null
+      }
     } catch (err) {
-      appStore.toast.error(err.message || '上传失败')
-      throw err
+      appStore.toast.error(errMsg(err, '加载文档列表失败'))
     } finally {
-      uploading.value = false
-      uploadProgress.value = 0
+      loading.value = false
     }
   }
 
-  // 上传纯文本内容
-  async function uploadText({ title, category, content }) {
+  async function refresh() {
+    await Promise.all([loadOptions(), loadDocuments(), loadStats()])
+  }
+
+  // ── AI 预填元数据（结果只做建议，入库前必须人工确认）────────────
+  async function suggestMetadata(fileName, snippet = '') {
+    const data = await http.post('/knowledge/metadata/suggest', { fileName, snippet })
+    return data.suggestion
+  }
+
+  // ── 上传入库（用 XHR 以获得真实上传进度）────────────────────────
+  async function upload({ file, content, meta, force = false }) {
+    if (uploading.value) return null
     uploading.value = true
+    uploadProgress.value = 0
+    uploadStage.value = '上传中'
+
+    const formData = new FormData()
+    if (file) formData.append('file', file)
+    if (content) formData.append('content', content)
+    Object.entries(meta).forEach(([k, v]) => {
+      if (v !== null && v !== undefined && v !== '') formData.append(k, v)
+    })
+
     try {
-      const data = await http.post('/knowledge/documents', { title, category, content })
-      await loadDocuments()
-      await loadCategories()
-      appStore.toast.success(`「${data.document.title}」已成功入库`)
-      return data.document
+      const result = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/knowledge/documents' + (force ? '?force=true' : ''))
+        Object.entries(identity.headers()).forEach(([k, v]) => xhr.setRequestHeader(k, v))
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) uploadProgress.value = Math.round((e.loaded / e.total) * 70)
+        })
+        xhr.addEventListener('load', () => {
+          let payload = {}
+          try { payload = JSON.parse(xhr.responseText) } catch { /* 忽略非 JSON 响应 */ }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            uploadProgress.value = 100
+            resolve(payload)
+          } else {
+            reject(new Error(payload?.error?.message || `上传失败（HTTP ${xhr.status}）`))
+          }
+        })
+        xhr.addEventListener('error', () => reject(new Error('网络错误，上传失败')))
+        xhr.send(formData)
+      })
+
+      // 内容重复时问一下要不要强制入库（测试时经常需要同一份文件按不同元数据各存一版）
+      if (result.duplicated && !force) {
+        uploading.value = false
+        const again = confirm(
+          `该文件内容已存在（《${result.document.document_title}》），已复用未重复计费。\n\n` +
+          '是否仍然强制入库一份新的（按当前填写的元数据）？'
+        )
+        if (again) return await upload({ file, content, meta, force: true })
+        return result.document
+      }
+
+      // 服务端在返回前已完成解析/分片/向量化，这里把阶段提示补全
+      uploadStage.value = result.duplicated ? '命中幂等，已复用' : '入库完成'
+      appStore.toast.success(
+        result.duplicated
+          ? result.message
+          : `《${result.document.document_title}》入库完成：${result.document.chunk_count} 个切片 / ${result.document.page_count} 页`
+      )
+      await loadDocuments(); await loadStats()
+      return result.document
     } catch (err) {
-      appStore.toast.error('入库失败：' + (err.message || '未知错误'))
+      uploadStage.value = ''
+      appStore.toast.error(errMsg(err, '入库失败'))
       throw err
     } finally {
       uploading.value = false
+      setTimeout(() => { uploadProgress.value = 0; uploadStage.value = '' }, 1200)
+    }
+  }
+
+  // ── 详情 ──────────────────────────────────────────────────────
+  async function selectDocument(docId) {
+    if (!docId) { selectedId.value = ''; detail.value = null; return }
+    selectedId.value = docId
+    detailLoading.value = true
+    try {
+      detail.value = await http.get(`/knowledge/documents/${docId}?chunk_limit=100`)
+    } catch (err) {
+      appStore.toast.error(errMsg(err, '加载文档详情失败'))
+      detail.value = null
+    } finally {
+      detailLoading.value = false
     }
   }
 
   async function deleteDocument(docId) {
-    const doc = documents.value.find(d => d.id === docId)
     await http.delete(`/knowledge/documents/${docId}`)
-    documents.value = documents.value.filter(d => d.id !== docId)
-    appStore.toast.success(`「${doc?.title}」已删除`)
+    appStore.toast.success('文档已删除')
+    if (selectedId.value === docId) { selectedId.value = ''; detail.value = null }
+    await loadDocuments(); await loadStats()
   }
 
-  // ── RAG 问答 ───────────────────────────────────────────────
-  const messages     = ref([])   // 问答历史
-  const querying     = ref(false)
-  const filterCategory = ref('')
-
-  let msgId = 0
-
-  async function query(question) {
-    if (!question.trim() || querying.value) return
-    querying.value = true
-
-    messages.value.push({
-      id:   ++msgId,
-      role: 'user',
-      content: question,
-      time: new Date().toISOString(),
-    })
-
-    const aiMsg = {
-      id:       ++msgId,
-      role:     'assistant',
-      content:  '',
-      sources:  [],
-      status:   '正在检索相关文档...',
-      streaming: true,
+  // 清空当前身份可见的全部文档（含源文件与向量）
+  async function clearAllDocuments() {
+    try {
+      const data = await http.delete('/knowledge/documents')
+      selectedId.value = ''
+      detail.value = null
+      await loadDocuments(); await loadStats()
+      appStore.toast.success(`已清空 ${data.deleted ?? 0} 篇文档（${data.chunks ?? 0} 个切片）`)
+    } catch (err) {
+      appStore.toast.error(errMsg(err, '清空失败'))
     }
-    messages.value.push(aiMsg)
-
-    await fetchStream(
-      '/api/knowledge/query/stream',
-      { question, category: filterCategory.value || undefined },
-      {
-        onToken: (token) => {
-          aiMsg.content += token
-          aiMsg.status = ''
-        },
-        onEvent: (event, data) => {
-          if (event === 'sources') {
-            aiMsg.sources = data.sources
-          }
-          if (event === 'status') {
-            aiMsg.status = data.message
-          }
-        },
-        onDone: () => {
-          aiMsg.streaming = false
-          aiMsg.status = ''
-        },
-        onError: (err) => {
-          aiMsg.streaming = false
-          aiMsg.status = ''
-          aiMsg.content = aiMsg.content || '查询失败，请重试。'
-          appStore.toast.error(err.message)
-        },
-      }
-    )
-
-    querying.value = false
   }
 
-  function clearMessages() {
-    messages.value = []
+  async function reindexDocument(docId) {
+    const data = await http.post(`/knowledge/documents/${docId}/reindex`, {})
+    appStore.toast.success(`重新入库完成：${data.document.chunk_count} 个切片`)
+    await selectDocument(docId); await loadDocuments()
+  }
+
+  // 源文件下载：带身份头，用 blob 下载（直接 window.open 带不上自定义头）
+  async function downloadSource(docId) {
+    const data = await http.get(`/knowledge/documents/${docId}/file`, { responseType: 'blob' })
+    const doc = detail.value?.document
+    const url = URL.createObjectURL(data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = doc?.file_name || 'source'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // ── 检索验证 ──────────────────────────────────────────────────
+  async function runSearch(question, extra = {}) {
+    searchPreview.question = question
+    searchPreview.loading = true
+    searchPreview.error = ''
+    try {
+      const data = await http.post('/knowledge/search', {
+        question, k: 5,
+        department: extra.department || filters.department || undefined,
+        version: extra.version || filters.version || undefined,
+        docType: extra.docType || filters.docType || undefined,
+        includeSuperseded: extra.includeSuperseded ?? filters.includeSuperseded,
+      })
+      searchPreview.hits = data.hits || []
+      searchPreview.diagnostics = data.diagnostics
+      searchPreview.appliedFilters = data.appliedFilters
+    } catch (err) {
+      searchPreview.hits = []
+      searchPreview.error = errMsg(err, '检索失败')
+    } finally {
+      searchPreview.loading = false
+    }
+  }
+
+  function resetFilters() {
+    Object.assign(filters, { department: '', docType: '', status: '', version: '', keyword: '', includeSuperseded: true })
+    return loadDocuments()
   }
 
   return {
-    documents, categories, uploading, uploadProgress,
-    messages, querying, filterCategory,
-    loadDocuments, loadCategories,
-    uploadFile, uploadText, deleteDocument,
-    query, clearMessages,
+    options, stats, documents, filters, loading,
+    uploading, uploadProgress, uploadStage,
+    selectedId, detail, detailLoading,
+    searchPreview,
+    loadOptions, loadStats, loadDocuments, refresh,
+    suggestMetadata, upload, selectDocument, deleteDocument, clearAllDocuments, reindexDocument, downloadSource,
+    runSearch, resetFilters,
   }
 })

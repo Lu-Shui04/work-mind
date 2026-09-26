@@ -6,6 +6,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.middleware import rate_limiter
+from app.routes.monitor import record_api_call
 from app.services.model import create_chat_model
 from app.services.prompt.prompt_service import (
     delete_template, get_template, list_templates, save_template, score_ab_test,
@@ -51,6 +52,9 @@ async def test_stream(body: dict):
 
         latency_ms = round(time.time() * 1000 - start_ms)
 
+        record_api_call(feature="prompt", input_tokens=input_tokens, output_tokens=output_tokens,
+                        latency_ms=latency_ms, from_cache=False)
+
         yield "done", {
             "latencyMs": latency_ms,
             "inputTokens": input_tokens,
@@ -89,6 +93,8 @@ async def ab_test(body: dict):
 
         answer_a, answer_b = res_a.content, res_b.content
         evaluation = await score_ab_test(question, answer_a, answer_b)
+        # A/B 会跑 2 次生成 + 3 次评分，按 5 次调用记账（评分的 token 未单独统计，保守计入）
+        record_api_call(feature="prompt", input_tokens=0, output_tokens=0, latency_ms=0, from_cache=False)
 
         return {"answerA": answer_a, "answerB": answer_b, "evaluation": evaluation}
     except Exception as err:

@@ -8,6 +8,15 @@
       </div>
       <div class="task-input-area">
         <textarea v-model="taskText" class="task-textarea" placeholder="描述你的任务，Agent 会自动拆解步骤..." :disabled="agentStore.running" @keydown.ctrl.enter="runTask" rows="4" />
+        <div class="kb-switch">
+          <span class="kb-label">知识库</span>
+          <button class="kb-opt" :class="{ active: knowledgeMode === 'auto' }"
+                  @click="knowledgeMode = 'auto'" title="自动：默认检索（与智能对话同一判定）">自动</button>
+          <button class="kb-opt" :class="{ active: knowledgeMode === 'force' }"
+                  @click="knowledgeMode = 'force'" title="强制检索：这次一定走知识库分支">强制</button>
+          <button class="kb-opt" :class="{ active: knowledgeMode === 'off' }"
+                  @click="knowledgeMode = 'off'" title="关闭：不让 Agent 查知识库">关闭</button>
+        </div>
         <div class="input-actions">
           <span class="hint">Ctrl+Enter 执行</span>
           <button class="btn btn-primary" @click="runTask" :disabled="!taskText.trim() || agentStore.running">{{ agentStore.running ? '执行中...' : '执行任务' }}</button>
@@ -51,6 +60,33 @@
             </div>
             <div class="task-desc">{{ task.task }}</div>
           </div>
+          <!-- 意图路由结果：这次任务走了哪条执行路径、为什么 -->
+          <div v-if="task.intent" class="route-bar">
+            <span class="route-tag" :class="task.intent.route">{{ task.intent.routeLabel || task.intent.route }}</span>
+            <span class="route-reason">{{ task.intent.reason }}</span>
+          </div>
+
+          <!-- 走了知识分支但没命中：把原因摊开（库空 / 被权限过滤 / 分数低于阈值） -->
+          <div v-if="task.recall && !task.sources?.length" class="agent-recall">
+            知识库未命中：{{ task.recall.explain }}
+            <span v-if="task.recall.totalChunks !== undefined">
+              （库内切片 {{ task.recall.totalChunks }} · 通过过滤 {{ task.recall.candidates }}<template
+                v-if="task.recall.bestScore != null"> · 最高分 {{ task.recall.bestScore }}</template><template
+                v-if="task.recall.threshold != null"> · 阈值 {{ task.recall.threshold }}</template>）
+            </span>
+          </div>
+
+          <!-- 知识库引用来源 -->
+          <div v-if="task.sources?.length" class="agent-sources">
+            <div v-for="(s, i) in task.sources" :key="s.chunkId" class="agent-source">
+              <span class="as-idx">[{{ i + 1 }}]</span>
+              <span class="as-title">{{ s.title }}</span>
+              <span class="as-loc">{{ s.pageLabel || (s.pageNumber ? '第' + s.pageNumber + '页' : '无页码') }}</span>
+              <span class="as-meta">{{ s.department }} · {{ s.version }}</span>
+              <span class="as-score">{{ (s.score * 100).toFixed(0) }}%</span>
+            </div>
+          </div>
+
           <div v-if="task.steps.length" class="steps-list">
             <ToolCallCard v-for="step in task.steps" :key="step.id" :step="step" />
           </div>
@@ -82,17 +118,74 @@ import ToolCallCard from '@/components/agent/ToolCallCard.vue'
 const agentStore = useAgentStore()
 const appStore   = useAppStore()
 const taskText   = ref('')
+// 知识库模式：auto=自动（后端"召回优先"）/ force=强制走知识分支 / off=不查知识库
+const knowledgeMode = ref('auto')
 const taskListEl = ref(null)
 
 marked.setOptions({ highlight: (c, l) => l && hljs.getLanguage(l) ? hljs.highlight(c, { language: l }).value : c, breaks: true })
 function renderMd(t) { try { return marked(t || '') } catch { return t } }
 function formatTime(iso) { return iso ? new Date(iso).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit', second:'2-digit' }) : '' }
-async function runTask() { if (!taskText.value.trim() || agentStore.running) return; const t = taskText.value.trim(); taskText.value = ''; await agentStore.runTask(t) }
+async function runTask() {
+  if (!taskText.value.trim() || agentStore.running) return
+  const t = taskText.value.trim()
+  taskText.value = ''
+  await agentStore.runTask(t, {
+    useKnowledge: knowledgeMode.value === 'auto' ? undefined : knowledgeMode.value === 'force',
+  })
+}
 function useExample(task) { if (!agentStore.running) taskText.value = task }
 async function copyAnswer(text) { await navigator.clipboard.writeText(text); appStore.toast.success('已复制') }
 onMounted(() => agentStore.loadMeta())
 </script>
 <style scoped>
+/* 意图路由条 */
+.route-bar {
+  display: flex; align-items: center; gap: 8px;
+  margin: 8px 0; padding: 6px 10px;
+  background: var(--color-bg); border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-sm); font-size: 11.5px;
+}
+.route-tag {
+  font-weight: 600; padding: 1px 8px; border-radius: var(--radius-full);
+  background: var(--color-primary-bg); color: var(--color-primary-dark);
+}
+.route-tag.tool { background: #e0e7ff; color: #4338ca; }
+.route-tag.knowledge { background: #dcfce7; color: #15803d; }
+.route-tag.chat { background: var(--color-border-light); color: var(--color-text-sub); }
+.route-reason { color: var(--color-text-muted); }
+
+/* 引用来源 */
+.kb-switch { display: inline-flex; align-items: center; gap: 2px; margin: 6px 0 2px; }
+.kb-label { font-size: 11px; color: var(--color-text-muted); margin-right: 4px; }
+.kb-opt {
+  border: 1px solid var(--color-border); background: transparent; color: var(--color-text-muted);
+  font-size: 11px; padding: 1px 8px; border-radius: var(--radius-full); cursor: pointer;
+  transition: all var(--transition);
+}
+.kb-opt:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.kb-opt.active {
+  background: var(--color-primary-bg); border-color: var(--color-primary);
+  color: var(--color-primary); font-weight: 600;
+}
+
+.agent-recall {
+  font-size: 11.5px; line-height: 1.6; color: #b45309;
+  background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--radius-sm);
+  padding: 6px 9px; margin-bottom: 8px;
+}
+.agent-sources { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.agent-source {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; padding: 4px 8px;
+  background: var(--color-bg); border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+.as-idx { font-family: var(--font-mono); color: var(--color-primary); font-weight: 600; }
+.as-title { font-weight: 600; color: var(--color-text); }
+.as-loc { color: var(--color-text-muted); }
+.as-meta { color: var(--color-primary-dark); background: var(--color-primary-bg); border-radius: var(--radius-full); padding: 0 6px; }
+.as-score { margin-left: auto; color: var(--color-success); font-family: var(--font-mono); }
+
 .agent-view { display:flex; height:100%; overflow:hidden; background:var(--color-bg); }
 .task-panel { width:300px; flex-shrink:0; background:var(--color-surface); border-right:1px solid var(--color-border); display:flex; flex-direction:column; overflow-y:auto; }
 .panel-header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px 10px; border-bottom:1px solid var(--color-border-light); flex-shrink:0; }

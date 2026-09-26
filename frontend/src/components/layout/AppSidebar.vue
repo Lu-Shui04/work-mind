@@ -30,18 +30,43 @@
         <el-icon><component :is="isDark ? 'Sunny' : 'Moon'" /></el-icon>
         <span>{{ isDark ? '浅色模式' : '深色模式' }}</span>
       </button>
+      <button class="reset-btn" @click="resetAll" :disabled="resetting" title="清空后端进程内的全部数据">
+        {{ resetting ? '重置中...' : '🧹 重置测试数据' }}
+      </button>
       <div class="version">v1.0.0</div>
     </div>
   </aside>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, RouterLink } from 'vue-router'
 import { useAppStore } from '@/stores/app.js'
+import http from '@/utils/http.js'
 
 const route = useRoute()
 const appStore = useAppStore()
+const resetting = ref(false)
+
+// 一键清空后端内存数据（会话/画像/文档/向量/申请/统计）。
+// 当前系统是纯内存存储，联调时旧数据会干扰判断，所以给一个显式入口。
+async function resetAll() {
+  if (!confirm('清空全部测试数据？\n\n会删除：对话会话与画像、知识库文档与向量、报销请假申请记录、用量统计与缓存统计。\n（源码与 Prompt 内置模板不受影响）')) return
+  resetting.value = true
+  try {
+    const data = await http.post('/admin/reset', {})
+    const d = data.detail || {}
+    appStore.toast.success(
+      `已重置：会话 ${d.chat?.sessions ?? 0} 个 / 文档 ${d.knowledge?.documents ?? 0} 篇 / ` +
+      `向量 ${d.vectors?.clearedChunks ?? 0} 片 / 申请 ${d.erp?.clearedApplications ?? 0} 条`
+    )
+    setTimeout(() => window.location.reload(), 900)
+  } catch (err) {
+    appStore.toast.error(err?.response?.data?.error?.message || '重置失败')
+  } finally {
+    resetting.value = false
+  }
+}
 
 const currentPath = computed(() => route.path)
 const isDark = computed(() => appStore.theme === 'dark')
@@ -181,4 +206,19 @@ function toggleTheme() {
   color: rgba(255,255,255,.2);
   margin-top: 6px;
 }
+
+.reset-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: var(--sidebar-text);
+  background: transparent;
+  border: 1px dashed rgba(255,255,255,.18);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.reset-btn:hover:not(:disabled) { color: #fca5a5; border-color: #fca5a5; }
+.reset-btn:disabled { opacity: .5; cursor: not-allowed; }
 </style>

@@ -1,14 +1,37 @@
 # docker-compose.yml
-# 一键启动所有服务：后端 + 向量数据库
-# 使用命令：docker-compose up -d
-
-version: '3.9'
+# 一键启动：PostgreSQL(pgvector) + 后端(FastAPI) + 前端(Nginx)
+# 使用命令：docker compose up -d --build
+#
+# 为什么知识库必须落到数据库：
+# 之前 documents / chunks 都放在进程内存里，容器一重建（--build / 重启 / 改代码）
+# 索引就没了，而 uploads/ 里的源文件还在 —— 表现和"权限过滤掉了"一模一样：
+# 库里看着有文档，检索却 0 条，且没有任何日志能看出来。
+# 现在切片与文档都在 PostgreSQL 里，向量检索由 pgvector 负责，重启不丢。
 
 services:
-  # ── 后端服务 ────────────────────────────────────────────────
+  # ── 知识库数据库（PostgreSQL 17 + pgvector）─────────────────────
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: workmind-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-workmind}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-workmind}
+      POSTGRES_DB: ${PG_DATABASE:-workmind}
+    ports:
+      - "${PG_PORT:-5433}:5432"          # 宿主机用 5433，避免与本机已有的 PG 冲突
+    volumes:
+      - workmind-pgdata:/var/lib/postgresql/data   # 数据卷：容器重建数据仍在
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-workmind} -d ${PG_DATABASE:-workmind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── 后端服务（Python / FastAPI）─────────────────────────────
   server:
     build:
-      context: ./server
+      context: ./server-py
       dockerfile: Dockerfile
     container_name: workmind-server
     restart: unless-stopped
@@ -18,32 +41,37 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - CHROMA_URL=http://chroma:8000
       - ALLOWED_ORIGINS=http://localhost:5173,https://yourdomain.com
-    depends_on:
-      chroma:
-        condition: service_started
+      # 知识库数据库（服务名 db 即容器网络内的主机名）
+      - DATABASE_URL=postgresql://${PG_USER:-workmind}:${PG_PASSWORD:-workmind}@db:5432/${PG_DATABASE:-workmind}
+      - PGVECTOR_DIM=2048
+      # 相似度阈值必须按 embedding 模型标定：智谱 embedding-3 上"语义相关但换了说法"
+      # 的查询只有 0.42~0.45，写 0.5 会导致整片召不回
+      - RAG_SIMILARITY_THRESHOLD=${RAG_SIMILARITY_THRESHOLD:-0.35}
+      - RAG_TOP_K=${RAG_TOP_K:-6}
+      # 检索不到内容时：grounded=明确说没找到（不拿模型自身知识兜底）/ fallback=照常回答
+      - RAG_ANSWER_POLICY=${RAG_ANSWER_POLICY:-grounded}
+      # 意图识别策略：recall_first（默认，默认就查库）/ strict（旧的严格模式）
+      - RAG_INTENT_MODE=${RAG_INTENT_MODE:-recall_first}
     volumes:
-      - ./server/uploads:/app/uploads   # 上传文件持久化
-    networks:
-      - workmind-net
+      - ./server-py/uploads:/app/uploads   # 上传文件持久化
+    depends_on:
+      db:
+        condition: service_healthy         # 等数据库就绪再起后端，避免首次启动建表失败
 
-  # ── Chroma 向量数据库（RAG 模块用）────────────────────────
-  chroma:
-    image: chromadb/chroma:latest
-    container_name: workmind-chroma
+  # ── 前端服务（Vue3 / Vite 构建 + Nginx 托管）───────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: workmind-frontend
     restart: unless-stopped
     ports:
-      - "8000:8000"
-    volumes:
-      - chroma-data:/chroma/chroma
-    networks:
-      - workmind-net
+      - "5173:80"                          # 访问 http://localhost:5173
+    depends_on:
+      - server                             # nginx 里把 /api 反代到 server:3000
 
 volumes:
-  chroma-data:
-
-networks:
-  workmind-net:
-    driver: bridge
+  workmind-pgdata:

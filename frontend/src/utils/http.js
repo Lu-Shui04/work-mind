@@ -2,6 +2,7 @@
 // 统一封装 axios：请求拦截、响应拦截、错误处理
 import axios from 'axios'
 import { useAppStore } from '@/stores/app.js'
+import { useIdentityStore } from '@/stores/identity.js'
 
 // 创建 axios 实例
 const http = axios.create({
@@ -12,7 +13,9 @@ const http = axios.create({
 // ── 请求拦截器 ─────────────────────────────────────────────────
 http.interceptors.request.use(
   (config) => {
-    // 可以在这里加 token：config.headers.Authorization = `Bearer ${token}`
+    // 统一注入身份头（后端据此做权限过滤；换成真登录时这里换成 Authorization）
+    const identity = useIdentityStore()
+    Object.assign(config.headers, identity.headers())
     return config
   },
   (error) => Promise.reject(error)
@@ -53,9 +56,10 @@ http.interceptors.response.use(
 // onError：出错时的回调
 export async function fetchStream(url, body, { onToken, onEvent, onDone, onError } = {}) {
   try {
+    const identity = useIdentityStore()
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...identity.headers() },
       body: JSON.stringify(body),
     })
 

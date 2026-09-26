@@ -41,6 +41,16 @@
     </div>
     <div class="input-tips">
       <span>Enter 发送 · Shift+Enter 换行</span>
+      <!-- 知识库检索模式：默认"自动"（后端召回优先），不好使时可以强制/关闭，不用猜 -->
+      <span class="kb-switch">
+        <span class="kb-label">知识库</span>
+        <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'auto' }"
+                @click="chatStore.knowledgeMode = 'auto'" title="自动：默认检索，只有闲聊/纯算式才跳过">自动</button>
+        <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'force' }"
+                @click="chatStore.knowledgeMode = 'force'" title="强制检索：这次一定要查知识库">强制</button>
+        <button class="kb-opt" :class="{ active: chatStore.knowledgeMode === 'off' }"
+                @click="chatStore.knowledgeMode = 'off'" title="关闭：这次不查知识库">关闭</button>
+      </span>
     </div>
   </div>
 </template>
@@ -131,6 +141,29 @@ function stopGenerate() {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.input-tips {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap;
+}
+
+.kb-switch { display: inline-flex; align-items: center; gap: 2px; }
+.kb-label { font-size: 11px; color: var(--color-text-muted); margin-right: 4px; }
+.kb-opt {
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.kb-opt:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.kb-opt.active {
+  background: var(--color-primary-bg); border-color: var(--color-primary);
+  color: var(--color-primary); font-weight: 600;
 }
 
 .char-count {

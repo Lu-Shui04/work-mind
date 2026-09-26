@@ -9,6 +9,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import config, validate_config
 from app.middleware import RequestLoggerMiddleware
+from app.services.db import StorageUnavailable, close_db, init_db
+from app.routes.admin import router as admin_router
 from app.routes.agent import router as agent_router
 from app.routes.chat import router as chat_router
 from app.routes.erp import router as erp_router
@@ -27,7 +29,7 @@ app = FastAPI(title="WorkMind Server (FastAPI)")
 
 
 # ── 基础中间件 ─────────────────────────────────────────────────
-# helmet 等价：基础安全响应头（CSP 关闭，与 Express 版一致）
+# 基础安全响应头（CSP 关闭）
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
@@ -90,11 +92,27 @@ app.include_router(workflow_router, prefix="/api/workflow")
 app.include_router(erp_router, prefix="/api/erp")
 app.include_router(prompt_router, prefix="/api/prompt")
 app.include_router(monitor_router, prefix="/api/monitor")
+# 测试/运维用的一键重置（生产环境应加鉴权或移除）
+app.include_router(admin_router, prefix="/api/admin")
+
+
+@app.exception_handler(StorageUnavailable)
+async def storage_unavailable_handler(request: Request, exc: StorageUnavailable):
+    """知识库数据库不可用时统一返回 503，而不是让每个接口各自 500。"""
+    return JSONResponse(status_code=503, content={"error": {"message": str(exc), "code": "STORAGE_UNAVAILABLE"}})
 
 
 @app.on_event("startup")
 async def on_startup():
+    # 连接 PostgreSQL + pgvector 并建表（幂等）。失败不阻止启动，
+    # 但知识库接口会明确报"数据库未连接"，不会静默返回空结果。
+    await init_db()
     logger.info("server started", {"port": config.app.port, "env": config.app.env})
     print("\n🚀 WorkMind Server (FastAPI) 已启动")
     print(f"   地址: http://localhost:{config.app.port}")
     print(f"   健康检查: http://localhost:{config.app.port}/health\n")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await close_db()

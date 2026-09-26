@@ -76,6 +76,9 @@
             <option v-for="f in featureOptions" :key="f.feature" :value="f.feature">{{ f.label }}</option>
           </select>
           <button class="btn btn-ghost btn-sm" @click="loadStats">刷新</button>
+          <button class="btn btn-ghost btn-sm danger" @click="resetStats" :disabled="resetting">
+            {{ resetting ? '重置中...' : '重置统计' }}
+          </button>
         </div>
       </div>
       <div class="table-wrap">
@@ -109,6 +112,22 @@ const featureFilter = ref('')
 let pollTimer = null
 const featureNames = { chat:'对话助手', knowledge:'RAG 知识库', agent:'任务 Agent', workflow:'内容工作流', erp:'ERP 审批', prompt:'Prompt 调试' }
 function featureLabel(f) { return featureNames[f] || f }
+// 重置用量与缓存统计（测试时把累计数字清零，避免干扰判断）
+const resetting = ref(false)
+async function resetStats() {
+  if (!confirm('重置用量统计与缓存命中统计？（预算设置保留）')) return
+  resetting.value = true
+  try {
+    await http.post('/monitor/reset', {})
+    await loadStats()
+    appStore.toast.success('统计已重置')
+  } catch (err) {
+    appStore.toast.error('重置失败')
+  } finally {
+    resetting.value = false
+  }
+}
+
 async function loadStats() {
   try { const d = await http.get('/monitor/stats'); s.value = d; newBudget.value = d.overview?.dailyBudget ?? 50 } catch {}
 }
@@ -145,6 +164,8 @@ export default { components: { MetricCard } }
 .metric-value { font-size:24px; font-weight:800; color:var(--color-text); line-height:1.2; }
 .metric-label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--color-text-muted); margin-top:4px; }
 .metric-sub { font-size:11px; color:var(--color-text-muted); margin-top:2px; }
+.btn-ghost.danger:hover:not(:disabled) { color:var(--color-danger); border-color:var(--color-danger); }
+.btn-ghost:disabled { opacity:.5; cursor:not-allowed; }
 .budget-bar-wrap { background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-lg); padding:var(--space-md) var(--space-lg); }
 .budget-label { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--color-text-sub); margin-bottom:8px; }
 .budget-pct { font-weight:700; color:var(--color-text); }

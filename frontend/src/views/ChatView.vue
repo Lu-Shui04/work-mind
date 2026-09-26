@@ -7,16 +7,25 @@
 
     <!-- 中：消息区域 -->
     <div class="chat-main">
-      <!-- 角色选择器 -->
-      <RoleSelector />
+      <!-- 检索范围预设 + 会话操作 -->
+      <div class="chat-toolbar">
+        <ScopeSelector />
+        <button class="clear-btn" :disabled="!chatStore.messages.length" @click="clearSession"
+                title="清空当前会话（同时清除服务端上下文）">
+          🧹 清空会话
+        </button>
+      </div>
 
       <!-- 消息列表 -->
       <div class="message-list" ref="listEl">
         <!-- 空状态 -->
         <div v-if="!chatStore.messages.length" class="empty-state">
           <el-icon class="role-icon"><component :is="roleIcon" /></el-icon>
-          <div class="title">{{ currentRoleLabel }}</div>
-          <div class="desc">{{ currentRoleDesc }}</div>
+          <div class="title">智能助手</div>
+          <div class="desc">
+            回答优先依据企业知识库，并标注来源；知识库里没有的内容会明确说明，不会用通用知识顶上。
+            <br />检索不到时可以在输入框下方切「知识库：关闭」，或在上面收窄/放宽检索范围。
+          </div>
           <!-- 快捷问题 -->
           <div class="quick-questions">
             <button
@@ -56,10 +65,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, watch, onMounted, nextTick } from 'vue'
 import { useChatStore } from '@/stores/chat.js'
 import SessionSidebar from '@/components/chat/SessionSidebar.vue'
-import RoleSelector from '@/components/chat/RoleSelector.vue'
+import ScopeSelector from '@/components/chat/ScopeSelector.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import ProfilePanel from '@/components/chat/ProfilePanel.vue'
@@ -69,27 +78,27 @@ const listEl     = ref(null)
 const bottomEl   = ref(null)
 const showProfile = ref(true)
 
-// 当前角色信息
-const currentRole = computed(() =>
-  chatStore.roles.find(r => r.id === chatStore.selectedRole) || { label: '通用助手', desc: '日常问答、通用任务' }
-)
-const currentRoleLabel = computed(() => currentRole.value.label)
-const currentRoleDesc  = computed(() => currentRole.value.desc)
+const roleIcon = 'ChatDotRound'
 
-const roleIconMap = { default: 'ChatDotRound', tech: 'Monitor', hr: 'User', legal: 'Document' }
-const roleIcon = computed(() => roleIconMap[chatStore.selectedRole] || 'ChatDotRound')
+// 快捷问题：围绕"知识库优先"这条主线，让第一次点进来的人立刻看到差异
+const quickQuestions = [
+  '知识库里有哪些内容？',
+  '年假是怎么规定的？',
+  '帮我写一个工作汇报开头',
+]
 
-// 按角色显示不同的快捷问题
-const quickQuestionsMap = {
-  default: ['今天有什么需要注意的工作？', '帮我写一个工作汇报开头', '如何提高工作效率？'],
-  tech:    ['解释一下 Vue3 的响应式原理', '帮我 review 一下代码', 'React 和 Vue 怎么选？'],
-  hr:      ['年假怎么计算？', '试用期最长多久？', '绩效考核流程是怎样的？'],
-  legal:   ['劳动合同必须包含哪些内容？', '知识产权归属如何约定？', 'NDA 协议要注意什么？'],
-}
-const quickQuestions = computed(() => quickQuestionsMap[chatStore.selectedRole] || quickQuestionsMap.default)
+// 检索范围的反馈由 ScopeSelector 自己显示（选中态 + 右侧那句说明），
+// 不再额外弹 toast —— 范围只影响之后的消息，弹窗反而是噪音。
 
 function sendQuick(q) {
   chatStore.sendMessage(q)
+}
+
+// 清空当前会话：本地消息 + 服务端历史一起清，避免"清空了但模型还记得"
+async function clearSession() {
+  if (!chatStore.messages.length) return
+  if (!confirm('清空当前会话的全部消息？服务端上下文也会一并清除。')) return
+  await chatStore.clearCurrentSession()
 }
 
 // 新消息到来时自动滚到底部
@@ -117,12 +126,24 @@ watch(
 
 onMounted(() => {
   chatStore.init()
-  chatStore.loadRoles()
+  // 角色预设已合并成一个助手，不再需要拉取角色列表
   chatStore.loadProfile()
 })
 </script>
 
 <style scoped>
+.chat-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-md); padding-right: var(--space-md);
+}
+.clear-btn {
+  border: 1px solid var(--color-border); background: var(--color-surface);
+  color: var(--color-text-sub); font-size: 12px; cursor: pointer;
+  padding: 4px 10px; border-radius: var(--radius-md); transition: var(--transition);
+}
+.clear-btn:hover:not(:disabled) { border-color: var(--color-danger); color: var(--color-danger); }
+.clear-btn:disabled { opacity: .45; cursor: not-allowed; }
+
 .chat-view {
   display: flex;
   height: 100%;

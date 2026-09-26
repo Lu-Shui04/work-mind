@@ -1,74 +1,92 @@
 # server-py/app/services/erp/approval.py
-# Multi-Agent 审批流：多个 Agent 扮演不同角色，模拟企业审批过程
-import asyncio
-import json
-from datetime import datetime, timezone
+"""
+Multi-Agent 审批：结构化裁决 + 只在"要材料"时打断人工。
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+【这一版修掉的四个硬伤】（对应之前那版被吐槽"看不懂"的流程）
+1. 旧版用关键词判断是否通过：_is_approved 只要文本里没有"驳回/不批/拒绝"就算通过，
+   于是"请补充结婚证及说明是否申请延长"这种**疑问句被直接判成"已通过"**。
+   → 现在改成结构化输出：decision ∈ {approve, reject, need_info}，由模型显式表态，不再猜。
+2. 旧版只在消息里出现"？"才生成申请人答复，导致疑问挂空、无人回答。
+   → 现在 decision=need_info 时**主动中断流程**，把问题抛给真人回答，
+     并允许同时修改申请数据（比如把"婚假 1 天"改成"事假 1 天"或改天数）。
+3. 旧版把所有字段无差别投喂给每个角色，主管会替 HR 操心结婚证，几个角色发言高度重复。
+   → 现在按角色裁剪字段视图（主管只看业务必要性相关信息，HR 只看假期与材料，财务只看金额票据）。
+4. 旧版只输出一段自然语言，前端无从来解释"凭什么"。
+   → 现在每个节点产出 decision + reason + checklist（逐条检查项与结论），前端直接渲染。
+"""
+import json
+import time
+from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 from app.services.model import create_chat_model
 from app.utils.logger import logger
 
-_model = create_chat_model(temperature=0.3)
+_review_model = create_chat_model(temperature=0)
 
-# ── 审批角色定义 ──────────────────────────────────────────────
 APPROVAL_ROLES = {
     "applicant": {"id": "applicant", "name": "申请人", "icon": "👤", "color": "#4f46e5", "desc": "提交申请，回答审批人的问题"},
-    "manager": {"id": "manager", "name": "直属主管", "icon": "👔", "color": "#0891b2", "desc": "审核申请合理性，确认业务必要性"},
-    "finance": {"id": "finance", "name": "财务专员", "icon": "💰", "color": "#059669", "desc": "审核费用合规性，确认金额和票据"},
-    "hr": {"id": "hr", "name": "HR 专员", "icon": "📋", "color": "#d97706", "desc": "审核假期政策合规性，确认余额"},
-    "director": {"id": "director", "name": "部门总监", "icon": "🏢", "color": "#dc2626", "desc": "大额报销或长期请假时的最终审批"},
+    "manager": {"id": "manager", "name": "直属主管", "icon": "👔", "color": "#0891b2", "desc": "只看业务必要性与团队影响"},
+    "finance": {"id": "finance", "name": "财务专员", "icon": "💰", "color": "#059669", "desc": "只看费用合规性与票据"},
+    "hr": {"id": "hr", "name": "HR 专员", "icon": "📋", "color": "#d97706", "desc": "只看假期类型、天数与证明材料"},
+    "director": {"id": "director", "name": "部门总监", "icon": "🏢", "color": "#dc2626", "desc": "大额/长假终审，关注成本与风险"},
+}
+
+LEAVE_LABELS = {"annual": "年假", "personal": "事假", "sick": "病假",
+                "compensatory": "调休", "marriage": "婚假", "maternity": "产假"}
+
+
+# ── 角色职责与字段裁剪（避免"主管替 HR 操心结婚证"这类串味）──────────
+_ROLE_SPEC = {
+    "manager": {
+        "duty": "你只负责判断这次请假的**业务必要性**：工作是否可以延后、是否影响团队交付、是否有替代安排。"
+                "假期类型是否符合规定、需要什么证明材料**不是你的职责**，不要评价。",
+        "checks": ["请假时段是否与关键交付/会议冲突", "请假时长对团队排期的影响是否可控", "是否给出了可交接的安排"],
+    },
+    "hr": {
+        "duty": "你只负责判断**假期类型与证明材料**：申请的天数是否符合该类假期的规定，是否缺少必要证明。"
+                "业务必要性不是你的职责。",
+        "checks": ["假期类型与申请天数的匹配度", "证明材料是否齐全（病假证明/结婚证等）", "是否存在应改用其他假期类型的情况"],
+    },
+    "finance": {
+        "duty": "你只负责判断**费用合规性**：金额是否超标准、票据是否齐全、科目是否正确。业务必要性不是你的职责。",
+        "checks": ["单笔金额是否超过限额", "住宿/餐饮等是否超出标准", "是否有需要补充的发票或说明"],
+    },
+    "director": {
+        "duty": "你是终审，只关注**成本与风险**：金额或时长是否显著偏离常规，是否有必要做例外批准。",
+        "checks": ["金额/时长是否处于合理区间", "前面节点的结论是否一致", "是否需要附加条件（如分期、事后补票）"],
+    },
 }
 
 
-# ── 系统提示词（每个角色的人格设定）──────────────────────────
-def _get_role_system(role_id: str, form_data: dict, form_type: str) -> str:
-    form_json = json.dumps(form_data, ensure_ascii=False, indent=2)
+def role_form_view(role_id: str, form_data: dict, form_type: str) -> dict:
+    """按角色裁剪字段视图：只给这个角色该看的字段，减少串味与重复发言。"""
     label = "报销" if form_type == "expense" else "请假"
+    base = {"申请类型": label, "申请人": form_data.get("applicantName")}
 
-    systems = {
-        "applicant": f"""你是{form_data.get('applicantName', '小王')}，正在提交{label}申请。
-申请内容：{form_json}
-要求：简洁回答审批人的问题，提供必要的说明。语气自然，像真实对话。不超过60字。""",
-
-        "manager": f"""你是直属主管，正在审核下属的{label}申请。
-申请内容：{form_json}
-你的职责：
-1. 判断这次{'报销是否有业务必要性' if form_type == 'expense' else '请假是否影响团队工作'}
-2. 金额或时间是否合理
-3. 可以提问补充信息，然后给出批准/驳回/要求补充的意见
-4. 语气严肃专业，像真实的主管。不超过80字。""",
-
-        "finance": f"""你是财务专员，负责审核报销合规性。
-申请内容：{form_json}
-公司规定：
-- 差旅：酒店每晚不超过800元，机票必须经济舱
-- 餐饮：每次不超过500元
-- 单笔超过3000元需附发票扫描件
-你的职责：检查是否合规，发现问题要指出。不超过80字。""",
-
-        "hr": f"""你是 HR 专员，负责审核请假合规性。
-申请内容：{form_json}
-假期规定：
-- 年假：入职满1年后享有5天，每多1年增加1天，最多15天
-- 事假：每年最多10天，超过3天影响年终绩效
-- 病假：需提供医院证明
-- 婚假：3天，需提供结婚证
-你的职责：核实假期余额和规定。不超过80字。""",
-
-        "director": f"""你是部门总监，只处理大额报销（>5000元）或长假（>5工作日）。
-申请内容：{form_json}
-你态度严格但公正，关注业务合理性和成本控制。
-最终给出明确的批准或驳回，并说明理由。不超过100字。""",
-    }
-
-    return systems.get(role_id, systems["manager"])
+    if form_type == "expense":
+        if role_id in ("finance", "director"):
+            view = {**base, "费用类型": form_data.get("type"),
+                    "明细": form_data.get("items"), "总金额": form_data.get("totalAmount"),
+                    "事由": form_data.get("reason")}
+        else:
+            view = {**base, "事由": form_data.get("reason"), "总金额": form_data.get("totalAmount")}
+    else:
+        if role_id in ("hr", "director"):
+            view = {**base, "假期类型": LEAVE_LABELS.get(form_data.get("type"), form_data.get("type")),
+                    "开始日期": form_data.get("startDate"), "结束日期": form_data.get("endDate"),
+                    "自然日": form_data.get("days"), "工作日": form_data.get("workdays"),
+                    "原因": form_data.get("reason"), "紧急联系人": form_data.get("emergencyContact")}
+        else:
+            view = {**base, "请假时段": f"{form_data.get('startDate')} ~ {form_data.get('endDate')}",
+                    "工作日": form_data.get("workdays"), "原因": form_data.get("reason")}
+    return view
 
 
-# ── 审批流程规划 ──────────────────────────────────────────────
-def _plan_approval_flow(form_data: dict, form_type: str) -> list[str]:
+def plan_approval_flow(form_data: dict, form_type: str) -> list[str]:
     flow = ["manager"]
-
     if form_type == "expense":
         flow.append("finance")
         if (form_data.get("totalAmount") or 0) > 5000:
@@ -77,113 +95,88 @@ def _plan_approval_flow(form_data: dict, form_type: str) -> list[str]:
         flow.append("hr")
         if (form_data.get("workdays") or 0) > 5:
             flow.append("director")
-
     return flow
 
 
-def _is_approved(text: str) -> bool:
-    reject_keywords = ["驳回", "不批", "拒绝", "不同意", "不予批准", "无法批准"]
-    return not any(kw in text for kw in reject_keywords)
+def plan_reasons(form_data: dict, form_type: str) -> list[str]:
+    reasons = []
+    if form_type == "expense":
+        reasons.append("报销类申请固定包含财务复核")
+        if (form_data.get("totalAmount") or 0) > 5000:
+            reasons.append(f"总金额 ¥{form_data.get('totalAmount')} 超过 ¥5000，需要部门总监终审")
+    else:
+        reasons.append("请假类申请固定包含 HR 复核")
+        if (form_data.get("workdays") or 0) > 5:
+            reasons.append(f"请假 {form_data.get('workdays')} 个工作日超过 5 天，需要部门总监终审")
+    return reasons
 
 
-# ── 单个审批角色的对话执行 ────────────────────────────────────
-async def _run_approver_turn(role_id: str, form_data: dict, form_type: str, conversation_history: list, on_event):
-    role = APPROVAL_ROLES[role_id]
-    system_prompt = _get_role_system(role_id, form_data, form_type)
-
-    logger.info("erp: approver turn", {"roleId": role_id})
-
-    question_response = await _model.ainvoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content="请审核这份申请。如果有疑问，可以提问；如果信息充分，直接给出审批意见（批准/驳回）。"),
-        *conversation_history,
-    ])
-
-    question_text = question_response.content
-
-    await on_event("message", {"from": role_id, "role": role, "content": question_text, "type": "question"})
-    conversation_history.append(AIMessage(content=f"[{role['name']}]：{question_text}"))
-
-    has_question = any(s in question_text for s in ["？", "?", "请问", "能否"])
-
-    if has_question and role_id != "director":
-        applicant_system = _get_role_system("applicant", form_data, form_type)
-        answer_response = await _model.ainvoke([
-            SystemMessage(content=applicant_system),
-            *conversation_history,
-            HumanMessage(content=f"{role['name']}刚才提了问题，请以申请人身份回答"),
-        ])
-        answer_text = answer_response.content
-
-        await on_event("message", {"from": "applicant", "role": APPROVAL_ROLES["applicant"], "content": answer_text, "type": "answer"})
-        conversation_history.append(AIMessage(content=f"[申请人]：{answer_text}"))
-
-        decision_response = await _model.ainvoke([
-            SystemMessage(content=system_prompt),
-            *conversation_history,
-            HumanMessage(content="申请人已经回答了你的问题，现在请给出最终的审批意见：批准或驳回，并说明理由。"),
-        ])
-        decision_text = decision_response.content
-
-        await on_event("message", {"from": role_id, "role": role, "content": decision_text, "type": "decision"})
-        conversation_history.append(AIMessage(content=f"[{role['name']}]：{decision_text}"))
-
-        return _is_approved(decision_text), decision_text
-
-    return _is_approved(question_text), question_text
+# ── 结构化裁决 ────────────────────────────────────────────────────────
+class CheckItem(BaseModel):
+    item: str = Field(description="检查项名称")
+    result: Literal["pass", "warn", "fail"] = Field(description="pass=符合, warn=需要说明, fail=不符合")
+    note: str = Field(description="判断依据，不超过 30 字")
 
 
-async def run_approval_flow(form_data: dict, form_type: str, on_event) -> dict:
+class ReviewDecision(BaseModel):
+    decision: Literal["approve", "reject", "need_info"] = Field(
+        description="approve=同意通过；reject=明确不同意；need_info=信息不足或存在疑点，需要申请人补充说明/修改申请")
+    reason: str = Field(description="结论理由，不超过 60 字")
+    checklist: list[CheckItem] = Field(description="2-4 条检查项，逐条给出结论")
+    questions: list[str] = Field(default_factory=list,
+                                 description="decision=need_info 时必填：要问申请人什么，1-3 条，具体可回答")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def review_application(role_id: str, form_data: dict, form_type: str,
+                             prior_messages: list[dict], applicant_answers: list[dict],
+                             force_decision: bool = False) -> dict:
+    """对一个审批节点做一次结构化评审。
+
+    prior_messages：前面节点已经产生的消息（让当前角色知道上文结论）
+    applicant_answers：真人补充过的说明（decision=need_info 被打断后用户填的）
     """
-    on_event 类型：
-      'plan'           → 公布审批流程
-      'approver_start' → 某个审批人开始审核
-      'message'        → 某个角色发出一条消息
-      'approver_done'  → 某个审批人给出决定
-      'final'          → 最终审批结果
-    """
-    logger.info("erp: approval flow started", {"formType": form_type})
+    spec = _ROLE_SPEC.get(role_id, _ROLE_SPEC["manager"])
+    view = role_form_view(role_id, form_data, form_type)
 
-    approver_ids = _plan_approval_flow(form_data, form_type)
-    label = "报销" if form_type == "expense" else "请假"
+    context_lines = []
+    for m in prior_messages[-6:]:
+        who = APPROVAL_ROLES.get(m.get("from"), {}).get("name", m.get("from"))
+        context_lines.append(f"[{who}] {m.get('content', '')[:120]}")
+    for a in applicant_answers:
+        context_lines.append(f"[申请人补充说明] {a.get('answer', '')}")
 
-    await on_event("plan", {
-        "approvers": [APPROVAL_ROLES[rid] for rid in approver_ids],
-        "totalSteps": len(approver_ids),
+    system = (
+        f"你是{APPROVAL_ROLES[role_id]['name']}。{spec['duty']}\n"
+        f"请逐条检查：{'；'.join(spec['checks'])}。\n"
+        "要求：信息足够就给出 approve/reject；只要存在**必须由申请人补充或修改**才能判断的疑点，"
+        "就返回 need_info 并列出具体问题，不要自己替他假设。宁可 need_info，也不要含糊通过。"
+    )
+    if force_decision:
+        # 已经补充过一轮材料：不再允许继续追问，必须给出明确结论（避免流程无限打转）
+        system += "\n【重要】申请人已经补充过说明，本轮**必须**给出 approve 或 reject，不允许再返回 need_info。"
+    user = (
+        f"申请内容（你被允许看到的字段）：\n{json.dumps(view, ensure_ascii=False, indent=2)}\n\n"
+        f"已有上下文：\n" + ("\n".join(context_lines) if context_lines else "（无）")
+    )
+
+    started = time.time()
+    result: ReviewDecision = await _review_model.with_structured_output(
+        ReviewDecision, method="function_calling"
+    ).ainvoke([{"role": "system", "content": system}, {"role": "user", "content": user}])
+
+    usage = getattr(result, "usage_metadata", None)  # 结构化输出不返回 usage，token 走响应对象不可得
+    data = result.model_dump()
+    if data["decision"] == "need_info" and not data["questions"]:
+        data["questions"] = [data["reason"]]
+    data["durationMs"] = round((time.time() - started) * 1000)
+    data["roleId"] = role_id
+    data["formView"] = view
+    logger.info("erp: review done", {
+        "roleId": role_id, "decision": data["decision"],
+        "checks": len(data["checklist"]), "ms": data["durationMs"],
     })
-
-    conversation_history = [
-        HumanMessage(content=f"申请人提交了{label}申请：\n{json.dumps(form_data, ensure_ascii=False, indent=2)}"),
-    ]
-
-    all_approved = True
-    final_comment = ""
-
-    for role_id in approver_ids:
-        role = APPROVAL_ROLES[role_id]
-        await on_event("approver_start", {"roleId": role_id, "role": role})
-
-        approved, comment = await _run_approver_turn(role_id, form_data, form_type, conversation_history, on_event)
-
-        await on_event("approver_done", {"roleId": role_id, "role": role, "approved": approved, "comment": comment})
-
-        if not approved:
-            all_approved = False
-            final_comment = f"被{role['name']}驳回：{comment}"
-            break
-
-        final_comment = comment
-        await asyncio.sleep(0.3)
-
-    result = {
-        "approved": all_approved,
-        "status": "approved" if all_approved else "rejected",
-        "comment": final_comment,
-        "approvedBy": [APPROVAL_ROLES[rid]["name"] for rid in approver_ids] if all_approved else [],
-        "completedAt": datetime.now(timezone.utc).isoformat(),
-    }
-
-    await on_event("final", result)
-    logger.info("erp: approval flow done", {"formType": form_type, "approved": all_approved})
-
-    return result
+    return data

@@ -49,14 +49,24 @@ async def read_doc_tool(question: str) -> str:
     logger.info("tool:read_doc", {"question": question})
 
     try:
-        from app.services.rag.query import retrieve_docs
-        docs = await retrieve_docs(question, k=3)
+        # 关键：必须用"当前调用者"的身份检索，否则会绕过权限把别的部门文档喂给模型
+        from app.services.identity import get_current_user
+        from app.services.rag.query import SearchFilters, retrieve
+
+        user = get_current_user()
+        docs = await retrieve(question, user, k=3, filters=SearchFilters())
 
         if not docs:
-            return f'知识库中未找到关于"{question}"的相关内容。'
+            return (f'知识库中未找到关于"{question}"的相关内容'
+                    f'（检索范围：租户 {user.tenant_id}，部门 {"/".join(user.departments)}，'
+                    f'密级 {user.clearance}）。可以提示用户该信息可能不在其权限范围内。')
 
-        return "\n\n".join(f"[文档{i + 1}] {d['title']}：{d['content']}" for i, d in enumerate(docs))
-    except Exception:
+        return "\n\n".join(
+            f"[文档{i + 1}]《{d['title']}》第{d['pageNumber']}页（部门:{d['department']} 版本:{d['version']}）：{d['content']}"
+            for i, d in enumerate(docs)
+        )
+    except Exception as err:
+        logger.warn("tool:read_doc failed", {"error": str(err)})
         return "知识库暂时不可用，请稍后重试。"
 
 

@@ -40,6 +40,7 @@ async def start_stream(body: dict):
 
         _active_workflows[thread_id] = {"graph": graph, "meta": meta, "config": config}
 
+        _wf_started = time.time()
         yield "start", {"threadId": thread_id, "workflowId": workflow_id}
         logger.info("workflow: started", {"workflowId": workflow_id, "threadId": thread_id})
 
@@ -66,6 +67,8 @@ async def start_stream(body: dict):
                             preview = first_val[:80] + ("..." if len(first_val) > 80 else "")
                     yield "node_done", {"nodeId": name, "preview": preview}
 
+        from app.routes.monitor import record_api_call
+        record_api_call(feature="workflow", latency_ms=round((time.time() - _wf_started) * 1000))
         state = await graph.aget_state(config)
 
         if state.next:

@@ -6,10 +6,12 @@ import { fetchStream } from '@/utils/http.js'
 import http from '@/utils/http.js'
 import { useAppStore } from './app.js'
 import { useMonitorStore } from './monitor.js'
+import { useIdentityStore } from './identity.js'
 
 export const useChatStore = defineStore('chat', () => {
   const appStore     = useAppStore()
   const monitorStore = useMonitorStore()
+  const identity     = useIdentityStore()
 
   // ── 会话列表 ──────────────────────────────────────────────────
   // 每个会话：{ id, title, messages: [], createdAt }
@@ -70,16 +72,32 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  // ── 角色 ──────────────────────────────────────────────────────
-  const selectedRole = ref('default')
-  const roles = ref([])
+  // ── 知识库检索模式（用户显式控制，覆盖后端的自动判定）────────
+  //   auto  = 自动（后端"召回优先"：默认就查，只有闲聊/纯算式才跳过）
+  //   force = 强制检索（这次一定要查库）
+  //   off   = 关闭检索（这次只凭模型自身知识回答）
+  const knowledgeMode = ref('auto')
 
-  async function loadRoles() {
-    try {
-      const data = await http.get('/chat/roles')
-      roles.value = data.roles
-    } catch {}
+  // ── 检索范围（替代原来的"角色选择器"）────────────────────────
+  // 角色只换一句 system prompt、不影响检索到哪些文档；这里每一项都真的
+  // 改变"查哪些文档"，是用户能感知到差异的地方。
+  // department 里的 '__mine__' 在发送时解析成当前身份的第一个部门。
+  const EMPTY_SCOPE = { department: null, docType: null, version: null, includeSuperseded: false }
+  const scopeId = ref('all')
+  const scope = ref({ ...EMPTY_SCOPE })
+
+  function setScope(id, patch = {}) {
+    scopeId.value = id
+    scope.value = { ...EMPTY_SCOPE, ...patch }
   }
+
+  // "本部门"预设：用当前身份的第一个部门；身份切换后自动跟着变
+  const resolvedDepartment = computed(() => {
+    const d = scope.value.department
+    if (!d) return undefined
+    if (d === '__mine__') return identity.departments?.[0] || undefined
+    return d
+  })
 
   // ── 用户画像 ──────────────────────────────────────────────────
   const profile = ref({})
@@ -121,6 +139,11 @@ export const useChatStore = defineStore('chat', () => {
       content:    '',
       fromCache:  false,
       streaming:  true,
+      // 知识库联动：意图判定结果 + 命中的引用来源（后端已按当前身份过滤）
+      intent:     null,
+      sources:    [],
+      // 召回诊断：未命中时说明原因（库是空的 / 被权限过滤 / 分数低于阈值）
+      recall:     null,
       time:       new Date().toISOString(),
     })
     session.messages.push(aiMsg)
@@ -130,8 +153,16 @@ export const useChatStore = defineStore('chat', () => {
       {
         message:   text,
         sessionId: currentId.value,
-        role:      selectedRole.value,
-        userId:    userId.value,
+        // role 已废弃（四个角色预设合并成一个助手），保留字段只为兼容
+        role:      'default',
+        userId:    identity.current.userId,
+        // 检索范围（前端显式选择 → 后端当硬过滤；不选则按身份自动）
+        knowledgeDepartment: resolvedDepartment.value,
+        knowledgeDocType: scope.value.docType || undefined,
+        knowledgeVersion: scope.value.version || undefined,
+        includeSuperseded: scope.value.includeSuperseded || undefined,
+        // undefined=自动判定 / true=强制检索 / false=关闭检索
+        useKnowledge: knowledgeMode.value === 'auto' ? undefined : knowledgeMode.value === 'force',
       },
       {
         onToken: (token) => {
@@ -140,6 +171,12 @@ export const useChatStore = defineStore('chat', () => {
         onEvent: (event, data) => {
           if (event === 'cache_hit') aiMsg.fromCache = true
           if (event === 'start')     aiMsg.streaming = true
+          // 意图判定：这次为什么（不）去查知识库，前端直接展示，便于解释与排障
+          if (event === 'intent')    aiMsg.intent = data
+          if (event === 'sources') {
+            aiMsg.sources = data.sources || []
+            aiMsg.recall  = data.recall || null
+          }
         },
         onDone: (data) => {
           aiMsg.streaming = false
@@ -184,6 +221,32 @@ export const useChatStore = defineStore('chat', () => {
     await sendMessage(lastUser.content)
   }
 
+  // ── 清空当前会话（前端消息 + 服务端历史）────────────────────
+  async function clearCurrentSession() {
+    const session = currentSession.value
+    if (!session) return
+    session.messages.splice(0, session.messages.length)
+    session.title = '新对话'
+    try {
+      // 服务端历史也要清，否则模型还会"记得"清空前的内容
+      await http.delete(`/chat/sessions/${session.id}`)
+      appStore.toast.success('已清空当前会话（含服务端上下文）')
+    } catch {
+      appStore.toast.warning('本地已清空，但服务端历史清除失败')
+    }
+  }
+
+  // 清空全部会话（测试时批量清理）
+  async function clearAllSessions() {
+    try {
+      await http.delete('/chat/sessions')
+    } catch { /* 服务端失败不阻断本地清理 */ }
+    sessions.value = []
+    currentId.value = null
+    newSession()
+    appStore.toast.success('已清空全部会话')
+  }
+
   // 复制消息内容
   async function copyMessage(content) {
     await navigator.clipboard.writeText(content)
@@ -192,11 +255,11 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, currentId, currentSession, messages,
-    selectedRole, roles,
+    knowledgeMode, scope, scopeId, setScope, resolvedDepartment,
     profile, userId,
     loading,
     init, newSession, switchSession, deleteSession,
-    loadRoles, loadProfile,
-    sendMessage, regenerate, copyMessage,
+    loadProfile,
+    sendMessage, regenerate, copyMessage, clearCurrentSession, clearAllSessions,
   }
 })

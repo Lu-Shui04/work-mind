@@ -90,7 +90,7 @@ class _ProfileExtraction(BaseModel):
 async def extract_and_update_profile(user_id: str, user_msg: str, ai_reply: str):
     try:
         current = get_profile(user_id)
-        extract_model = chat_model.with_structured_output(_ProfileExtraction)
+        extract_model = chat_model.with_structured_output(_ProfileExtraction, method="function_calling")
 
         result: _ProfileExtraction = await extract_model.ainvoke([
             {
@@ -127,6 +127,14 @@ async def extract_and_update_profile(user_id: str, user_msg: str, ai_reply: str)
     except Exception:
         # 画像提取失败不影响主流程，静默处理
         pass
+
+
+def clear_all() -> dict:
+    """清空所有会话历史与用户画像（测试用）。"""
+    counts = {"sessions": len(_session_store), "profiles": len(_profile_store)}
+    _session_store.clear()
+    _profile_store.clear()
+    return counts
 
 
 # 返回所有会话列表（前端展示用）

@@ -18,11 +18,8 @@
         <el-icon><Warning /></el-icon> 今日用量已达 {{ budgetAlert }}，请注意控制
       </div>
 
-      <!-- 用户头像（演示用） -->
-      <div class="user-info">
-        <div class="user-avatar">大</div>
-        <span class="user-name">大伟</span>
-      </div>
+      <!-- 当前身份（决定知识库可见范围，权限由后端强制校验） -->
+      <IdentitySwitcher />
     </div>
   </header>
 </template>
@@ -31,6 +28,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useMonitorStore } from '@/stores/monitor.js'
+import IdentitySwitcher from '@/components/layout/IdentitySwitcher.vue'
 
 const route = useRoute()
 const monitorStore = useMonitorStore()

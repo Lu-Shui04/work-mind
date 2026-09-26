@@ -7,6 +7,9 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+# 回归测试一起打进镜像，容器内可直接跑：
+#   docker exec workmind-server python /app/tests/test_parser_cross_page.py
+COPY tests/ ./tests/
 
 ENV NODE_ENV=production
 EXPOSE 3000

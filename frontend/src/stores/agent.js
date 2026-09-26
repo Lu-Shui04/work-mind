@@ -1,7 +1,7 @@
 // frontend/src/stores/agent.js
 // Agent 模块状态：任务历史、工具调用步骤、执行状态
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, reactive } from 'vue'
 import { fetchStream } from '@/utils/http.js'
 import http from '@/utils/http.js'
 import { useAppStore } from './app.js'
@@ -47,7 +47,7 @@ export const useAgentStore = defineStore('agent', () => {
   let taskId = 0
 
   // ── 执行任务 ───────────────────────────────────────────────
-  async function runTask(taskText) {
+  async function runTask(taskText, options = {}) {
     if (!taskText.trim() || running.value) return
 
     running.value = true
@@ -55,22 +55,30 @@ export const useAgentStore = defineStore('agent', () => {
     const startTime = Date.now()
 
     // 创建任务记录（先加进列表，实时更新）
-    const task = {
+    // 必须用 reactive() 包裹：push 进数组后 Vue 存的是原始对象，
+    // 直接用闭包里的裸对象改字段不会触发渲染（流式 token 就不会逐字出现）。
+    const task = reactive({
       id,
       task:      taskText,
-      steps:     [],       // 工具调用步骤数组
-      answer:    '',       // 最终回答
+      steps:     [],         // 工具调用步骤数组
+      answer:    '',         // 最终回答
       status:    'running',  // running | done | error
+      // 意图路由与知识库引用（Agent 已与知识库打通）
+      intent:    null,
+      sources:   [],
+      // 召回诊断：没命中时说明原因（库空 / 被权限过滤 / 分数低于阈值）
+      recall:    null,
       startTime: new Date().toISOString(),
       duration:  0,
-    }
+    })
 
     tasks.value.unshift(task)
     currentTask.value = task
 
     await fetchStream(
       '/api/agent/run',
-      { task: taskText },
+      // useKnowledge: undefined=自动（后端默认"召回优先"）/ true=强制检索 / false=关闭
+      { task: taskText, useKnowledge: options.useKnowledge },
       {
         onToken: (token) => {
           task.answer += token
@@ -79,6 +87,17 @@ export const useAgentStore = defineStore('agent', () => {
         onEvent: (event, data) => {
           if (event === 'start') {
             task.status = 'running'
+          }
+
+          // LangGraph 意图分类结果：knowledge / tool / chat
+          if (event === 'intent') {
+            task.intent = data
+          }
+
+          // 知识库引用（后端已按当前身份过滤）
+          if (event === 'sources') {
+            task.sources  = data.sources || []
+            task.recall   = data.recall || null
           }
 
           // 工具被调用：记录步骤

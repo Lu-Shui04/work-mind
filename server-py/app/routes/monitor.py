@@ -30,6 +30,14 @@ def record_api_call(feature="chat", input_tokens=0, output_tokens=0, latency_ms=
         _stats["calls"].pop(0)
 
 
+def reset_stats() -> dict:
+    """重置用量统计（测试用）；预算保留当前设置，缓存统计一并归零。"""
+    cleared = len(_stats["calls"])
+    _stats["calls"] = []
+    cache.stats = {"hits": 0, "misses": 0, "savedTokens": 0}
+    return {"clearedCalls": cleared}
+
+
 def _percentile(arr, p):
     if not arr:
         return 0
@@ -125,6 +133,13 @@ async def stats():
         ],
         "cacheStats": cache.get_stats(),
     }
+
+
+@router.post("/reset")
+async def reset():
+    """重置用量统计与缓存命中统计（测试用，预算保留）。"""
+    result = reset_stats()
+    return {"success": True, **result}
 
 
 @router.put("/budget")

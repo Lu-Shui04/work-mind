@@ -4,9 +4,12 @@
   <div class="session-sidebar">
     <div class="sidebar-header">
       <span class="sidebar-title">对话记录</span>
-      <button class="btn-new" @click="chatStore.newSession()" title="新建对话">
-        <span>＋</span>
-      </button>
+      <span class="header-ops">
+        <button class="btn-clear" @click="clearAll" title="清空全部会话">清空</button>
+        <button class="btn-new" @click="chatStore.newSession()" title="新建对话">
+          <span>＋</span>
+        </button>
+      </span>
     </div>
 
     <div class="session-list">
@@ -51,6 +54,12 @@ function deleteSession(id) {
   }
   chatStore.deleteSession(id)
 }
+
+// 清空全部会话（测试时批量清理；服务端上下文一并清掉）
+async function clearAll() {
+  if (!confirm('清空全部会话？本地与服务端的对话上下文都会被清除。')) return
+  await chatStore.clearAllSessions()
+}
 </script>
 
 <style scoped>
@@ -78,6 +87,20 @@ function deleteSession(id) {
   letter-spacing: .06em;
   color: var(--color-text-muted);
 }
+
+.header-ops { display: flex; align-items: center; gap: 6px; }
+
+.btn-clear {
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: var(--transition);
+}
+.btn-clear:hover { border-color: var(--color-danger); color: var(--color-danger); }
 
 .btn-new {
   width: 24px;

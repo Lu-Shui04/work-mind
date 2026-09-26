@@ -31,7 +31,7 @@ class ExpenseForm(BaseModel):
 async def parse_expense_form(text: str) -> dict:
     today = date.today().isoformat()
 
-    extract_model = _model.with_structured_output(ExpenseForm)
+    extract_model = _model.with_structured_output(ExpenseForm, method="function_calling")
     result: ExpenseForm = await extract_model.ainvoke([
         {
             "role": "system",
@@ -78,7 +78,7 @@ def _count_workdays(start_str: str, end_str: str) -> int:
 async def parse_leave_form(text: str) -> dict:
     today = date.today().isoformat()
 
-    extract_model = _model.with_structured_output(LeaveForm)
+    extract_model = _model.with_structured_output(LeaveForm, method="function_calling")
     result: LeaveForm = await extract_model.ainvoke([
         {
             "role": "system",
