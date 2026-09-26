@@ -70,3 +70,17 @@ def create_embeddings():
 # 单例：应用启动时创建一次，全局复用
 chat_model = create_chat_model(temperature=0.7, streaming=True)
 embeddings = create_embeddings()
+
+
+def primary_model_name() -> str:
+    """当前对话模型名 —— 计费按它查单价（见 services/pricing.py）。
+
+    取配置名即可：DeepSeek 侧的老名字（本项目用的是 deepseek-chat）实际由
+    V4.1-Flash 提供服务，定价表里这些名字都映射到 Flash 档，算出来的钱一样。
+    """
+    return getattr(chat_model, "model_name", "") or config.ai.primary_model
+
+
+def embeddings_tier_name() -> str:
+    """向量模型的计费档位名（知识库入库 / 问句向量化按它计价）。"""
+    return "zhipu-embedding-3" if config.ai.zhipu_key else "openai-embeddings"

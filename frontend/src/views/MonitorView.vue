@@ -6,7 +6,9 @@
       <MetricCard label="缓存命中率" :value="s.overview?.cacheHitRate ?? '0%'"
                   :sub="`命中 ${s.overview?.cacheHitsToday ?? 0} 次 · 省下 ${s.overview?.savedTokensToday ?? 0} tokens`"
                   color="purple" />
-      <MetricCard label="今日费用" :value="`¥${s.overview?.costCNYToday ?? 0}`" :sub="`预算 ¥${s.overview?.dailyBudget ?? 50}`" color="amber" />
+      <MetricCard label="今日费用" :value="`¥${s.overview?.costCNYToday ?? 0}`"
+                  :sub="`预算 ¥${s.overview?.dailyBudget ?? 50} · ${pricing.period || ''}`"
+                  color="amber" />
       <MetricCard label="平均响应" :value="`${s.latency?.avg ?? 0}ms`" :sub="`P99: ${s.latency?.p99 ?? 0}ms`" color="green" />
     </div>
 
@@ -30,6 +32,30 @@
         <input type="number" v-model.number="newBudget" class="input budget-input" min="1" />
         <button class="btn btn-primary btn-xs" @click="updateBudget">保存</button>
         <button class="btn btn-ghost btn-xs" @click="showBE = false">取消</button>
+      </div>
+
+      <!-- 当前生效的单价：让"费用"这个数字能人工核对，而不是一个说不清的数 -->
+      <div v-if="pricing.tier" class="price-line">
+        <span class="price-title">计费口径</span>
+        <span class="price-chip">{{ pricing.tier }}</span>
+        <span class="price-chip" :class="{ peak: pricing.peak }">{{ pricing.period }}</span>
+        <span v-if="pricing.prices?.cache_miss != null" class="price-detail">
+          输入（未命中缓存）¥{{ pricing.prices.cache_miss }}/M ·
+          输入（命中缓存）¥{{ pricing.prices.cache_hit }}/M ·
+          输出 ¥{{ pricing.prices.output }}/M
+        </span>
+        <span v-else class="price-detail">
+          输入 ¥{{ pricing.prices?.input ?? 0 }}/M（该厂商无峰谷与缓存差价）
+        </span>
+        <a class="price-src" :href="pricing.source" target="_blank" rel="noopener">
+          DeepSeek 官方价目（{{ pricing.checkedAt }} 核对）
+        </a>
+        <!-- 没配单价的档位要如实说：否则"知识库费用≈0"会被误读成"知识库免费" -->
+        <span v-if="pricing.unpriced?.length" class="price-warn"
+              :title="'这些档位没有可引用的公开单价，只记 token、费用按 0 计：' + pricing.unpriced.join('、')
+                       + '。可在 .env 里配置对应单价（如 PRICE_RERANK_PER_M）'">
+          ⚠ {{ pricing.unpriced.join('、') }} 未计价
+        </span>
       </div>
     </div>
 
@@ -92,13 +118,20 @@
       </div>
       <div class="table-wrap">
         <table class="call-table">
-          <thead><tr><th>时间</th><th>功能</th><th>输入 T</th><th>输出 T</th><th>费用</th><th>延迟</th><th>来源</th></tr></thead>
+          <thead><tr><th>时间</th><th>功能</th><th>模型</th><th>输入 T</th><th>命中缓存 T</th><th>输出 T</th><th>费用</th><th>延迟</th><th>来源</th></tr></thead>
           <tbody>
-            <tr v-if="!filteredCalls.length"><td colspan="7" class="empty-row">暂无记录，进行操作后刷新</td></tr>
+            <tr v-if="!filteredCalls.length"><td colspan="9" class="empty-row">暂无记录，进行操作后刷新</td></tr>
             <tr v-for="(c,i) in filteredCalls" :key="i" :class="{ 'from-cache': c.fromCache }">
               <td class="time-cell">{{ fmtTime(c.time) }}</td>
               <td><span class="feature-tag">{{ featureLabel(c.feature) }}</span></td>
-              <td>{{ c.inputT }}</td><td>{{ c.outputT }}</td>
+              <td class="model-cell" :title="c.model || ''">{{ c.model || '—' }}</td>
+              <td>{{ c.inputT }}</td>
+              <!-- 提示缓存命中的输入：单价只有未命中的 1/50，单列出来才对得上账 -->
+              <td class="cached-cell" :title="c.cachedT ? '命中提示缓存的输入 token（单价 ¥'
+                    + ((pricing.prices?.cache_hit ?? 0)) + '/M）' : ''">
+                {{ c.cachedT ? c.cachedT : '—' }}
+              </td>
+              <td>{{ c.outputT }}</td>
               <td>{{ c.fromCache ? '—' : `¥${c.costCNY}` }}</td>
               <td>{{ c.fromCache ? '—' : `${c.latencyMs}ms` }}</td>
               <td>
@@ -129,6 +162,8 @@ const s = computed(() => ({
   byFeature: mon.byFeature,
   recentCalls: mon.recentCalls,
 }))
+// 当前生效的单价与时段（后端按官方价目算好传过来，前端只展示）
+const pricing = computed(() => mon.pricing || {})
 const showBE = ref(false)
 const newBudget = ref(50)
 const featureFilter = ref('')
@@ -204,6 +239,16 @@ export default { components: { MetricCard } }
 .budget-pct.warn { color:var(--color-warning); }
 .btn-text-xs { font-size:11px; color:var(--color-primary); background:none; border:none; cursor:pointer; margin-left:auto; }
 .source-badge { font-size:10px; padding:2px 8px; border-radius:var(--radius-full); background:var(--color-border-light); color:var(--color-text-muted); }
+.price-line { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px; font-size:11px; color:var(--color-text-muted); }
+.price-title { font-weight:600; color:var(--color-text-sub); }
+.price-chip { padding:1px 8px; border-radius:var(--radius-full); background:var(--color-border-light); font-family:var(--font-mono); }
+.price-chip.peak { background:#fef3c7; color:#b45309; }
+.price-detail { font-family:var(--font-mono); }
+.price-warn { color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:var(--radius-full); padding:1px 8px; cursor:help; }
+.price-src { color:var(--color-primary); text-decoration:none; }
+.price-src:hover { text-decoration:underline; }
+.model-cell { font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cached-cell { color:var(--color-success); font-family:var(--font-mono); }
 .source-badge.degraded { background:#fef3c7; color:#b45309; }
 .budget-bar { height:6px; background:var(--color-border); border-radius:var(--radius-full); overflow:hidden; }
 .budget-fill { height:100%; background:var(--color-primary); border-radius:var(--radius-full); transition:width .5s; }

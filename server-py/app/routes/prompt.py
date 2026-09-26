@@ -7,13 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.middleware import rate_limiter
 from app.routes.monitor import record_api_call
-from app.services.model import create_chat_model
+from app.services import pricing
+from app.services.model import create_chat_model, primary_model_name
 from app.services.trace import start_trace
 from app.services.prompt.prompt_service import (
     delete_template, get_template, list_templates, save_template, score_ab_test,
 )
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
+from app.utils.tokens import cache_read_of
 
 router = APIRouter()
 
@@ -50,6 +52,7 @@ async def test_stream(body: dict):
         full_reply = ""
         input_tokens = 0
         output_tokens = 0
+        cached_tokens = 0
         start_ms = time.time() * 1000
 
         async for chunk in test_model.astream(messages, max_tokens=max_tokens):
@@ -59,10 +62,12 @@ async def test_stream(body: dict):
             if getattr(chunk, "usage_metadata", None):
                 input_tokens = chunk.usage_metadata.get("input_tokens", 0)
                 output_tokens = chunk.usage_metadata.get("output_tokens", 0)
+                cached_tokens = cache_read_of(chunk.usage_metadata)
 
         latency_ms = round(time.time() * 1000 - start_ms)
 
         record_api_call(feature="prompt", input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_input_tokens=cached_tokens, model=primary_model_name(),
                         latency_ms=latency_ms, from_cache=False)
 
         trace.step("llm", "模型生成", duration_ms=latency_ms, detail={
@@ -82,7 +87,9 @@ async def test_stream(body: dict):
             "inputTokens": input_tokens,
             "outputTokens": output_tokens,
             "totalTokens": input_tokens + output_tokens,
-            "costCNY": ((input_tokens / 1e6 * 0.27) + (output_tokens / 1e6 * 1.10)) * 7.2,
+            # 费用按官方现价实算（模型 × 缓存命中 × 峰谷），不再写死 2024 年的美元单价
+            "costCNY": pricing.cost_cny(primary_model_name(), input_tokens, output_tokens,
+                                        cached_tokens),
             "runId": trace.run_id,
         }
 
@@ -117,7 +124,7 @@ async def ab_test_stream(body: dict):
         answers = {"a": "", "b": ""}
         # 两个变体各自的真实 token：A/B 一次要跑 5 次模型调用，不记的话看板上
         # "Prompt 调试"就只有调用次数、费用永远是 ¥0（实测就是这样）
-        variant_usage = {"a": (0, 0), "b": (0, 0)}
+        variant_usage = {"a": (0, 0, 0), "b": (0, 0, 0)}   # (输入, 输出, 缓存命中输入)
         started = time.time()
 
         # 全链路追踪：A/B 一次跑 5 次模型调用（2 次生成 + 3 次评分），
@@ -144,7 +151,8 @@ async def ab_test_stream(body: dict):
                     usage = getattr(chunk, "usage_metadata", None)
                     if usage:
                         variant_usage[key] = (usage.get("input_tokens", 0) or 0,
-                                              usage.get("output_tokens", 0) or 0)
+                                              usage.get("output_tokens", 0) or 0,
+                                              cache_read_of(usage))
             except Exception as err:  # noqa: BLE001 - 单个变体失败不该拖垮整次对比
                 logger.error("ab test variant failed", {"variant": key, "error": str(err)})
                 await queue.put(("variant_error", {"variant": key, "message": str(err)[:200]}))
@@ -186,7 +194,10 @@ async def ab_test_stream(body: dict):
         # A/B = 2 次生成 + 3 次评分的真实用量，合成一条记录（一次用户操作 = 一行）
         input_tokens = sum(v[0] for v in variant_usage.values()) + int(score_usage.get("input_tokens", 0))
         output_tokens = sum(v[1] for v in variant_usage.values()) + int(score_usage.get("output_tokens", 0))
+        cached_tokens = (sum(v[2] for v in variant_usage.values())
+                         + int(score_usage.get("cached_input_tokens", 0)))
         record_api_call(feature="prompt", input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_input_tokens=cached_tokens, model=primary_model_name(),
                         latency_ms=round((time.time() - started) * 1000), from_cache=False,
                         estimated=(input_tokens == 0 and output_tokens == 0))
         logger.info("ab test done", {"latencyMs": round((time.time() - started) * 1000)})

@@ -25,7 +25,7 @@ from app.schemas.document import (
     IngestStatus,
 )
 from app.services.db import VECTOR_DIM
-from app.services.model import embeddings
+from app.services.model import embeddings, embeddings_tier_name
 from app.services.rag.parser import parse_document
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
@@ -64,10 +64,14 @@ def _record_embedding_usage(chars: int, started: float, doc) -> None:
 
     if chars <= 0:
         return
+    tokens = estimate_tokens_from_chars(chars)   # 见 utils/tokens.py 的估算口径
     record_api_call(
         feature="knowledge",
-        input_tokens=estimate_tokens_from_chars(chars),  # 见 utils/tokens.py 的估算口径
+        input_tokens=tokens,
         output_tokens=0,
+        # 向量化走的是智谱 embedding-3（0.5 元/百万 tokens），**不是** DeepSeek 的单价 ——
+        # 以前按 DeepSeek 的价格算，入库费用是错的
+        model=embeddings_tier_name(),
         latency_ms=round((time.time() - started) * 1000),
         tenant_id=getattr(doc, "tenant_id", "") or "",
         user_id=getattr(doc, "created_by", "") or "",

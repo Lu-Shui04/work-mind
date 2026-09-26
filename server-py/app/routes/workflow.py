@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from app.middleware import rate_limiter
+from app.services.model import primary_model_name
 from app.services.workflow.workflows import WORKFLOW_BUILDERS, WORKFLOW_META
 from app.utils.logger import logger
 from app.services.trace import start_trace, trace_step
@@ -114,8 +115,9 @@ async def start_stream(body: dict):
             yield ev
 
         from app.routes.monitor import record_api_call
-        input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+        input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
         record_api_call(feature="workflow", input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_input_tokens=cached_tokens, model=primary_model_name(),
                         latency_ms=round((time.time() - _wf_started) * 1000))
         state = await graph.aget_state(config)
 
@@ -184,8 +186,9 @@ async def resume_stream(body: dict):
         result = final_state.values.get(meta["resultKey"], "")
 
         from app.routes.monitor import record_api_call
-        input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+        input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
         record_api_call(feature="workflow", input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_input_tokens=cached_tokens, model=primary_model_name(),
                         latency_ms=round((time.time() - started) * 1000))
 
         trace.step("response", "工作流完成", detail={

@@ -7,7 +7,8 @@ from typing import Literal
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
-from app.services.model import create_chat_model
+from app.services import pricing
+from app.services.model import create_chat_model, primary_model_name
 from app.utils.tokens import sum_usage
 
 _model = create_chat_model(temperature=0)
@@ -22,12 +23,16 @@ def _record_parse_usage(handler: UsageMetadataCallbackHandler, started: float) -
     from app.routes.monitor import record_api_call
     from app.services.trace import trace_step
 
-    input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
     latency_ms = round((time.time() - started) * 1000)
     record_api_call(feature="erp", input_tokens=input_tokens, output_tokens=output_tokens,
+                    cached_input_tokens=cached_tokens, model=primary_model_name(),
                     latency_ms=latency_ms)
     trace_step("llm", "自然语言解析（结构化输出）", duration_ms=latency_ms,
-               detail={"inputTokens": input_tokens, "outputTokens": output_tokens})
+               detail={"inputTokens": input_tokens, "outputTokens": output_tokens,
+                       "cachedInputTokens": cached_tokens,
+                       "costCNY": pricing.cost_cny(primary_model_name(), input_tokens,
+                                                   output_tokens, cached_tokens)})
     return {"inputTokens": input_tokens, "outputTokens": output_tokens}
 
 

@@ -15,6 +15,7 @@ from app.services.chat.memory import (
 )
 from app.services.db import StorageUnavailable
 from app.services.identity import User, current_user
+from app.services import pricing
 from app.services.model import chat_model
 from app.services.rag.intent import classify_intent
 from app.services.rag.query import (
@@ -24,6 +25,7 @@ from app.services.rag.query import (
 from app.services.trace import start_trace, trace_step
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
+from app.utils.tokens import cache_read_of
 
 router = APIRouter()
 
@@ -59,6 +61,17 @@ class ChatStreamRequest(BaseModel):
     knowledgeVersion: str | None = None
     knowledgeDocType: str | None = None
     includeSuperseded: bool = False
+
+
+def chat_model_name() -> str:
+    """当前对话模型的真实名字（计费要按它查单价）。
+
+    注意：这里取的是**配置的**模型名（本项目是 deepseek-chat）。
+    DeepSeek 侧返回的 response_metadata.model_name 是 deepseek-flash ——
+    老名字实际由 V4.1-Flash 提供服务，定价表里两者都映射到 Flash 档，
+    所以用哪个名字都能算对。
+    """
+    return getattr(chat_model, "model_name", "") or "deepseek-chat"
 
 
 def _cache_scope(user: User, sources: list[dict]) -> str:
@@ -286,6 +299,7 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             full_reply = ""
             input_tokens = 0
             output_tokens = 0
+            cached_tokens = 0      # 输入里命中提示缓存的 token（单价只有 1/50）
 
             # 先把"知识库未命中"的说明推出去，再流式输出模型回答
             if miss_notice:
@@ -302,10 +316,15 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 if getattr(chunk, "usage_metadata", None):
                     input_tokens = chunk.usage_metadata.get("input_tokens", 0)
                     output_tokens = chunk.usage_metadata.get("output_tokens", 0)
+                    cached_tokens = cache_read_of(chunk.usage_metadata)
             trace_step("llm", "对话模型生成", duration_ms=round((time.time() - _llm_t0) * 1000),
-                       detail={"model": getattr(chat_model, "model_name", "") or "chat_model",
+                       detail={"model": chat_model_name(),
                                "inputTokens": input_tokens,
-                               "outputTokens": output_tokens, "replyChars": len(full_reply),
+                               "outputTokens": output_tokens,
+                               "cachedInputTokens": cached_tokens,
+                               "costCNY": pricing.cost_cny(chat_model_name(), input_tokens,
+                                                           output_tokens, cached_tokens),
+                               "replyChars": len(full_reply),
                                "messages": len(messages), "reply": full_reply})
 
             # 记住这一轮；超过阈值会自动异步压缩更早的对话（不阻塞本次回答）
@@ -320,7 +339,8 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             from app.routes.monitor import record_api_call
             record_api_call(feature="chat", input_tokens=input_tokens, output_tokens=output_tokens,
                             latency_ms=round((time.time() - started) * 1000), from_cache=False,
-                            tenant_id=user.tenant_id, user_id=user_id)
+                            tenant_id=user.tenant_id, user_id=user_id,
+                            model=chat_model_name(), cached_input_tokens=cached_tokens)
 
             trace_step("response", "返回回答", detail={
                 "reply": full_reply,

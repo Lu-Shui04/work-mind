@@ -592,6 +592,31 @@ Agent（每步模型调用累加）、工作流（整条图的 token）、ERP（
 其中 embedding / bge 重排这类**接口不返回 usage** 的调用按字符估算，记录里标 `estimated=true`，
 看板上显示为「估算」，不跟模型返回的真实 token 混为一谈。
 
+#### 计费单价（`server-py/app/services/pricing.py`）
+
+单价不写死在代码注释里，而是照官方价目表逐项实现，并且**按模型 × 缓存命中 × 峰谷时段**实算：
+
+| 项目（元 / 百万 tokens） | deepseek-flash | deepseek-v4-pro |
+|--------------------------|----------------|-----------------|
+| 输入（缓存命中）空闲      | 0.02           | 0.15            |
+| 输入（缓存未命中）空闲    | 1              | 4.5             |
+| 输出 空闲                | 4              | 13.5            |
+
+- 高峰时段价格 = 空闲 × 2；高峰为**北京时间**周一至周五 9:00-12:00、14:00-18:00，
+  其余（含周末与法定节假日全天）为空闲。
+- 模型名映射：`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` → Flash；
+  `deepseek-v4-pro` → Pro；老名字 `deepseek-chat`（本项目默认用的就是它）实际由
+  DeepSeek-V4.1-Flash 提供服务，同样按 Flash 计费（实测 response_metadata.model_name 返回 deepseek-flash）。
+- **提示缓存**（DeepSeek 的 `usage.input_token_details.cache_read`）单列统计并单独计价 ——
+  它单价只有未命中的 1/50，不分出来的话费用会明显偏高。
+- 第三方接口（智谱 embedding-3 = 0.5 元/百万；bge 重排无公开单价）另建档位：
+  bge 重排默认**按 0 计**并在看板标「未计价」，要计就配 `PRICE_RERANK_PER_M` —— 不编价格。
+- 价格来源：<https://api-docs.deepseek.com/zh-cn/quick_start/pricing>（核对时间写在 `pricing.py` 顶部）。
+  改价只需改这一个文件；看板顶部会显示**当前生效的档位、时段与单价**，费用可人工核对。
+
+> 历史数据说明：换计价口径之前落库的 `usage_calls` 仍是旧价算出来的，
+> 想让今日费用从干净的口径开始，看板上点「重置统计」即可。
+
 ### 全链路追踪（`/trace` 页面 / `/api/trace/*`）
 
 用途和开发者盯终端看流程一样，区别是**可回看、可搜索、能对着某一条聊天记录打开**：

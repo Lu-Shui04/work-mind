@@ -98,6 +98,8 @@ async def run(body: dict, user: User = Depends(current_user)):
                         feature="agent",
                         input_tokens=usage.get("inputTokens", 0),
                         output_tokens=usage.get("outputTokens", 0),
+                        cached_input_tokens=usage.get("cachedInputTokens", 0),
+                        model=usage.get("model", ""),
                         latency_ms=round((time.time() - started) * 1000),
                         from_cache=False,
                     )

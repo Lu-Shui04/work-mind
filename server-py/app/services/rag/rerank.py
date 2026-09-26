@@ -25,7 +25,7 @@ import httpx
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
-from app.services.model import create_chat_model
+from app.services.model import create_chat_model, primary_model_name
 from app.services.trace import trace_step
 from app.utils.logger import logger
 from app.utils.tokens import estimate_tokens_many, sum_usage
@@ -166,15 +166,21 @@ async def rerank(query: str, docs: list[str], usage_out: dict | None = None) -> 
         if usage_out is None:
             return
         if handler is not None:
-            it, ot = sum_usage(handler.usage_metadata)
+            it, ot, cached = sum_usage(handler.usage_metadata)
             if it or ot:
-                usage_out.update({"input_tokens": it, "output_tokens": ot, "estimated": False})
+                # 重排走的是 DeepSeek（provider=llm）→ 按当前主模型计价
+                usage_out.update({"input_tokens": it, "output_tokens": ot,
+                                  "cached_input_tokens": cached, "estimated": False,
+                                  "pricing_tier": primary_model_name()})
             else:
                 usage_out.update({"input_tokens": estimate_tokens_many([query, *docs]),
                                   "output_tokens": 0, "estimated": True})
         else:
+            # bge 之类的第三方 rerank 接口：不回 usage，按字符估算。
+            # 单价按第三方档位（默认 0，可用 PRICE_RERANK_PER_M 配置）—— 不编价格。
             usage_out.update({"input_tokens": estimate_tokens_many([query, *docs]),
-                              "output_tokens": 0, "estimated": estimated_fallback})
+                              "output_tokens": 0, "estimated": estimated_fallback,
+                              "pricing_tier": "siliconflow-bge-reranker"})
         usage_out["latency_ms"] = round((time.time() - started) * 1000)
 
     try:

@@ -25,6 +25,7 @@ from app.schemas.document import (
 )
 from app.services.db import StorageUnavailable, storage_info
 from app.services.identity import User, can_view, current_user
+from app.services.model import primary_model_name
 from app.services.rag.ingest import (
     delete_document, ingest_document, reindex_document, sha256_of,
 )
@@ -67,8 +68,9 @@ def _record_knowledge_usage(handler, started: float, user: User) -> None:
     from app.routes.monitor import record_api_call
     from app.utils.tokens import sum_usage
 
-    input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
     record_api_call(feature="knowledge", input_tokens=input_tokens, output_tokens=output_tokens,
+                    cached_input_tokens=cached_tokens, model=primary_model_name(),
                     latency_ms=round((time.time() - started) * 1000),
                     tenant_id=user.tenant_id, user_id=user.user_id)
 

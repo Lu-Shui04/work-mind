@@ -35,19 +35,37 @@ def estimate_tokens_many(texts) -> int:
     return sum(estimate_tokens(t) for t in (texts or []))
 
 
-def sum_usage(usage_metadata) -> tuple[int, int]:
-    """把 LangChain UsageMetadataCallbackHandler.usage_metadata 汇总成 (输入, 输出)。
+def sum_usage(usage_metadata) -> tuple[int, int, int]:
+    """汇总成 (输入, 输出, **缓存命中的输入**)。
 
-    形如 {"deepseek-chat": {"input_tokens": 1, "output_tokens": 2}, ...}。
+    输入形如 {"deepseek-flash": {"input_tokens": 1, "output_tokens": 2,
+                                "input_token_details": {"cache_read": 0}}, ...}。
     为什么用回调处理器而不是读返回值：with_structured_output(...) 返回的是**解析后的
     pydantic 对象**，里面没有 usage；挂个 handler 才能在不动业务代码的前提下拿到真实 token。
     一次链式调用里可能用到多个模型实例，所以按模型累加。
+
+    第三个返回值是提示缓存命中的输入 token（DeepSeek 的 cache_read）：
+    它单价只有未命中的 1/50，必须单独拿出来算，否则费用会明显偏高。
     """
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     for entry in (usage_metadata or {}).values():
         if not isinstance(entry, dict):
             continue
         input_tokens += int(entry.get("input_tokens") or 0)
         output_tokens += int(entry.get("output_tokens") or 0)
-    return input_tokens, output_tokens
+        details = entry.get("input_token_details") or {}
+        if isinstance(details, dict):
+            cached_tokens += int(details.get("cache_read") or 0)
+    return input_tokens, output_tokens, cached_tokens
+
+
+def cache_read_of(usage_metadata) -> int:
+    """从单条 usage_metadata（例如流式的最后一个 chunk）里取缓存命中的输入 token。"""
+    if not isinstance(usage_metadata, dict):
+        return 0
+    details = usage_metadata.get("input_token_details") or {}
+    if not isinstance(details, dict):
+        return 0
+    return int(details.get("cache_read") or 0)

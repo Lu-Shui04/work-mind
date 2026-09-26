@@ -18,6 +18,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   const last7Days = ref([])
   const recentCalls = ref([])
   const cacheStats = ref({})
+  const pricing = ref({})     // 当前生效的单价与时段（后端按官方价目算好传过来）
   const loaded = ref(false)
   const error = ref('')
 
@@ -39,6 +40,7 @@ export const useMonitorStore = defineStore('monitor', () => {
     last7Days.value = d.last7Days || []
     recentCalls.value = d.recentCalls || []
     cacheStats.value = d.cacheStats || {}
+    pricing.value = d.pricing || {}
     loaded.value = true
     error.value = ''
   }
@@ -68,7 +70,7 @@ export const useMonitorStore = defineStore('monitor', () => {
   }
 
   return {
-    overview, latency, byFeature, last7Days, recentCalls, cacheStats,
+    overview, latency, byFeature, last7Days, recentCalls, cacheStats, pricing,
     loaded, error, dailyBudget, todaySpend, budgetWarning,
     apply, refresh, start, stop,
   }

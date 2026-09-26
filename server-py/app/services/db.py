@@ -197,9 +197,14 @@ CREATE TABLE IF NOT EXISTS usage_calls (
     cost_cny      DOUBLE PRECISION NOT NULL DEFAULT 0,
     from_cache    BOOLEAN NOT NULL DEFAULT FALSE,
     saved_tokens  INTEGER NOT NULL DEFAULT 0,
-    estimated     BOOLEAN NOT NULL DEFAULT FALSE
+    estimated     BOOLEAN NOT NULL DEFAULT FALSE,
+    model         TEXT NOT NULL DEFAULT '',
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0
 )
 """,
+    # 老库升级：计费口径变了（要按模型 + 缓存命中算钱），这两列用来核对费用
+    "ALTER TABLE usage_calls ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE usage_calls ADD COLUMN IF NOT EXISTS cached_input_tokens INTEGER NOT NULL DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_usage_calls_ts      ON usage_calls (ts DESC)",
     "CREATE INDEX IF NOT EXISTS idx_usage_calls_feature ON usage_calls (feature, ts DESC)",
 

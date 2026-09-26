@@ -160,8 +160,9 @@ B的评分：相关性{eval_b.relevance} 准确性{eval_b.accuracy} 清晰度{ev
     ], config=config)
 
     if usage_out is not None:
-        input_tokens, output_tokens = sum_usage(handler.usage_metadata)
-        usage_out.update({"input_tokens": input_tokens, "output_tokens": output_tokens})
+        input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
+        usage_out.update({"input_tokens": input_tokens, "output_tokens": output_tokens,
+                          "cached_input_tokens": cached_tokens})
 
     return {
         "scoreA": eval_a.model_dump(),

@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException
 
+from app.services import pricing
 from app.services.cache import cache
 from app.services.db import get_pool, get_setting, set_setting
 from app.utils.logger import logger
@@ -37,10 +38,9 @@ router = APIRouter()
 
 _start_time = time.time()
 
-# DeepSeek 官方价目（美元 / 百万 token）与汇率：改价只改这里，别散落在各个路由里
-PRICE_INPUT_PER_M = 0.27
-PRICE_OUTPUT_PER_M = 1.10
-USD_TO_CNY = 7.2
+# 价格表统一放在 app/services/pricing.py（DeepSeek 官方现价：按模型 × 缓存命中 × 峰谷时段）。
+# 这里不再写死单价 —— 以前写的是 2024 年 deepseek-chat 的美元价 + 7.2 汇率，
+# 既过时、也不是本项目实际在用的模型，还漏算了缓存命中与峰谷差价。
 
 DEFAULT_DAILY_BUDGET = 50.0          # ¥50 日预算
 _SETTING_BUDGET = "monitor.dailyBudget"
@@ -60,9 +60,10 @@ def _tz():
         return timezone.utc
 
 
-def _cost_cny(input_tokens: int, output_tokens: int) -> float:
-    usd = (input_tokens / 1e6 * PRICE_INPUT_PER_M) + (output_tokens / 1e6 * PRICE_OUTPUT_PER_M)
-    return usd * USD_TO_CNY
+def _cost_cny(input_tokens: int, output_tokens: int, model: str = "",
+              cached_input_tokens: int = 0) -> float:
+    """按当前时段与模型的实际单价算钱（详见 app/services/pricing.py）。"""
+    return pricing.cost_cny(model, input_tokens, output_tokens, cached_input_tokens)
 
 
 async def _insert_call(row: dict) -> None:
@@ -75,12 +76,14 @@ async def _insert_call(row: dict) -> None:
                 """
                 INSERT INTO usage_calls
                     (ts, feature, tenant_id, user_id, input_tokens, output_tokens,
-                     latency_ms, cost_cny, from_cache, saved_tokens, estimated)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                     latency_ms, cost_cny, from_cache, saved_tokens, estimated,
+                     model, cached_input_tokens)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 row["ts"], row["feature"], row["tenantId"], row["userId"],
                 row["inputT"], row["outputT"], row["latencyMs"], row["costCNY"],
                 row["fromCache"], row["savedTokens"], row["estimated"],
+                row.get("model") or "", row.get("cachedT") or 0,
             )
     except Exception as err:  # noqa: BLE001 - 记账失败不能影响业务请求
         logger.warn("monitor: 用量落库失败（本次仅内存统计）", {"error": str(err)})
@@ -89,19 +92,31 @@ async def _insert_call(row: dict) -> None:
 def record_api_call(feature: str = "chat", input_tokens: int = 0, output_tokens: int = 0,
                     latency_ms: int = 0, from_cache: bool = False,
                     tenant_id: str = "", user_id: str = "",
-                    saved_tokens: int = 0, estimated: bool = False) -> dict:
+                    saved_tokens: int = 0, estimated: bool = False,
+                    model: str = "", cached_input_tokens: int = 0,
+                    cost_cny: float | None = None) -> dict:
     """记一次模型调用。
 
     estimated=True 表示这个 token 数不是模型返回的，而是按字符数估算的
     （embedding 接口不回 usage，只能估），看板上会标出来，避免把估算当成账实。
+
+    model               —— 实际调用的模型名；费用按它对应的官方单价算（见 services/pricing.py）
+    cached_input_tokens —— 输入里命中提示缓存的 token（DeepSeek 的 cache_read），单价便宜 50 倍
+    cost_cny            —— 显式指定费用（知识库那种"一次调用混了两个厂商"的场景自己算）
 
     这个函数是同步的、可在流式生成器里直接调用：先写内存镜像保证看板立刻能看到，
     再 fire-and-forget 落库；没有事件循环（同步上下文）时只留内存，不抛异常。
     """
     input_tokens = int(input_tokens or 0)
     output_tokens = int(output_tokens or 0)
+    cached_input_tokens = int(cached_input_tokens or 0)
     latency_ms = int(latency_ms or 0)
-    cost = 0.0 if from_cache else _cost_cny(input_tokens, output_tokens)
+    if from_cache:
+        cost = 0.0
+    elif cost_cny is not None:
+        cost = float(cost_cny)
+    else:
+        cost = _cost_cny(input_tokens, output_tokens, model, cached_input_tokens)
 
     row = {
         "time": datetime.now(timezone.utc),
@@ -109,8 +124,10 @@ def record_api_call(feature: str = "chat", input_tokens: int = 0, output_tokens:
         "feature": feature or "chat",
         "tenantId": tenant_id or "",
         "userId": user_id or "",
+        "model": model or "",
         "inputT": input_tokens,
         "outputT": output_tokens,
+        "cachedT": cached_input_tokens,
         "costCNY": cost,
         "latencyMs": latency_ms,
         "fromCache": bool(from_cache),
@@ -241,12 +258,14 @@ def _stats_from_memory() -> dict:
             {
                 "time": c["time"].isoformat(), "feature": c["feature"],
                 "inputT": c["inputT"], "outputT": c["outputT"],
+                "cachedT": c.get("cachedT", 0), "model": c.get("model", ""),
                 "costCNY": round(c["costCNY"], 5), "latencyMs": c["latencyMs"],
                 "fromCache": c["fromCache"], "estimated": c["estimated"],
             }
             for c in list(reversed(_recent))[:50]
         ],
         "cacheStats": cache.get_stats(),
+        "pricing": pricing.describe(),
     }
 
 
@@ -296,7 +315,7 @@ async def _stats_from_db(pool) -> dict:
         recent = await conn.fetch(
             """
             SELECT ts, feature, input_tokens, output_tokens, latency_ms,
-                   cost_cny, from_cache, estimated
+                   cost_cny, from_cache, estimated, model, cached_input_tokens
             FROM usage_calls ORDER BY id DESC LIMIT 50
             """
         )
@@ -368,12 +387,16 @@ async def _stats_from_db(pool) -> dict:
             {
                 "time": r["ts"].isoformat(), "feature": r["feature"],
                 "inputT": r["input_tokens"], "outputT": r["output_tokens"],
+                "cachedT": r["cached_input_tokens"], "model": r["model"],
                 "costCNY": round(float(r["cost_cny"]), 5), "latencyMs": r["latency_ms"],
                 "fromCache": r["from_cache"], "estimated": r["estimated"],
             }
             for r in recent
         ],
         "cacheStats": cache.get_stats(),
+        # 当前生效的单价与时段（高峰/空闲）：让看板上的费用可以人工核对，
+        # 而不是"一个说不清的数字"
+        "pricing": pricing.describe(),
     }
 
 

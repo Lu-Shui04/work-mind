@@ -29,7 +29,8 @@ from app.services.agent.tools import (
 from app.services.chat.memory import append_turn, memory_block
 from app.services.db import StorageUnavailable
 from app.services.identity import User, get_current_user, reset_current_user, set_current_user
-from app.services.model import create_chat_model
+from app.services import pricing
+from app.services.model import create_chat_model, primary_model_name
 from app.services.rag.intent import classify_intent
 from app.services.trace import trace_step
 from app.services.rag.query import (
@@ -37,6 +38,7 @@ from app.services.rag.query import (
     no_knowledge_reply, retrieve_with_meta,
 )
 from app.utils.logger import logger
+from app.utils.tokens import cache_read_of
 
 
 def _tool_catalog() -> str:
@@ -433,6 +435,7 @@ async def run_agent(task: str, on_event, user: User | None = None,
     max_steps_hit = False
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0     # 输入里命中提示缓存的 token（单价只有 1/50，计费要单独算）
     try:
         # 1) 要不要查知识库：与智能对话共用 rag/intent.py 的判定
         intent = await classify_intent(task)
@@ -625,6 +628,7 @@ async def run_agent(task: str, on_event, user: User | None = None,
                 if usage:
                     input_tokens += usage.get("input_tokens", 0) or 0
                     output_tokens += usage.get("output_tokens", 0) or 0
+                    cached_tokens += cache_read_of(usage)
 
             # 一次模型调用结束：把过滤器里滞留的尾巴吐出来，并重置状态
             if event_type == "on_chat_model_end":
@@ -681,13 +685,18 @@ async def run_agent(task: str, on_event, user: User | None = None,
         trace_step("response", "任务完成", detail={
             "route": route, "toolCalls": step_count, "modelSteps": model_steps,
             "maxStepsReached": max_steps_hit, "inputTokens": input_tokens,
-            "outputTokens": output_tokens, "answer": final_content,
+            "outputTokens": output_tokens, "cachedInputTokens": cached_tokens,
+            "costCNY": pricing.cost_cny(primary_model_name(), input_tokens, output_tokens,
+                                        cached_tokens),
+            "answer": final_content,
         })
         await on_event("done", {"steps": step_count, "modelSteps": model_steps, "route": route,
                                 "contentLength": len(final_content),
                                 "maxStepsReached": max_steps_hit,
                                 "maxSteps": MAX_STEPS,
-                                "inputTokens": input_tokens, "outputTokens": output_tokens})
+                                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                                "cachedInputTokens": cached_tokens,
+                                "model": primary_model_name()})
         logger.info("agent: done", {"toolCalls": step_count, "modelSteps": model_steps,
                                     "route": route, "maxStepsReached": max_steps_hit})
     except Exception as err:

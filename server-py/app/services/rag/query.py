@@ -25,7 +25,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from app.schemas.document import DocumentRecord
 from app.services.identity import SqlParams, User, can_view, doc_visibility_sql, version_visible
-from app.services.model import chat_model, embeddings
+from app.services import pricing
+from app.services.model import chat_model, embeddings, embeddings_tier_name
 from app.services.rag import rerank
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
@@ -212,13 +213,25 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
     from app.utils.tokens import estimate_tokens
 
     # query 向量化：embedding 接口不回 usage，按字符估算（estimated=True）
-    input_tokens = estimate_tokens(question) + int(rerank_usage.get("input_tokens") or 0)
-    output_tokens = int(rerank_usage.get("output_tokens") or 0)
+    query_tokens = estimate_tokens(question)
+    rerank_in = int(rerank_usage.get("input_tokens") or 0)
+    rerank_out = int(rerank_usage.get("output_tokens") or 0)
+    input_tokens = query_tokens + rerank_in
+    output_tokens = rerank_out
     # 只要有一段数字是估的，整条记录就标成"估算"；重排拿到真实 usage 时才是账实
     estimated = bool(rerank_usage.get("estimated", True)) if rerank_usage else True
+    # 【费用必须分厂商算】：一次检索里混了两种调用 ——
+    #   问句向量化走智谱 embedding-3（0.5 元/百万），重排走 DeepSeek 或第三方 rerank 接口。
+    #   以前整条记录统一按 DeepSeek 对话模型的价格算，等于把两个厂商的单价都算错了。
+    cost = (pricing.cost_for_tier(embeddings_tier_name(), query_tokens)
+            + pricing.cost_for_tier(rerank_usage.get("pricing_tier", ""), rerank_in, rerank_out,
+                                    int(rerank_usage.get("cached_input_tokens") or 0)))
     record_api_call(
         feature="knowledge",
         input_tokens=input_tokens, output_tokens=output_tokens,
+        model=(f"{embeddings_tier_name()} + {rerank_usage.get('pricing_tier')}"
+               if rerank_usage else embeddings_tier_name()),
+        cost_cny=cost,
         latency_ms=round((time.time() - started) * 1000),
         tenant_id=user.tenant_id, user_id=user.user_id,
         estimated=estimated,
