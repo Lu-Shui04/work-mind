@@ -20,10 +20,14 @@ def _record_parse_usage(handler: UsageMetadataCallbackHandler, started: float) -
     费用永远是 ¥0，看板上的"ERP 审批"因此完全没有参考价值。
     """
     from app.routes.monitor import record_api_call
+    from app.services.trace import trace_step
 
     input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    latency_ms = round((time.time() - started) * 1000)
     record_api_call(feature="erp", input_tokens=input_tokens, output_tokens=output_tokens,
-                    latency_ms=round((time.time() - started) * 1000))
+                    latency_ms=latency_ms)
+    trace_step("llm", "自然语言解析（结构化输出）", duration_ms=latency_ms,
+               detail={"inputTokens": input_tokens, "outputTokens": output_tokens})
     return {"inputTokens": input_tokens, "outputTokens": output_tokens}
 
 

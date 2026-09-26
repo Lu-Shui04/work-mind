@@ -9,6 +9,7 @@ from langchain_core.callbacks import UsageMetadataCallbackHandler
 from app.middleware import rate_limiter
 from app.services.workflow.workflows import WORKFLOW_BUILDERS, WORKFLOW_META
 from app.utils.logger import logger
+from app.services.trace import start_trace, trace_step
 from app.utils.sse import sse_stream
 from app.utils.tokens import sum_usage
 
@@ -47,6 +48,8 @@ async def _translate_graph_events(graph, graph_input, config, meta):
             node = next((n for n in meta["nodes"] if n["id"] == name), None)
             if node and name != last_node:
                 last_node = current_node = name
+                # 全链路追踪：每个节点 = 一次模型调用，进出都留痕
+                trace_step("node", "节点开始：" + node["label"])
                 yield "node_start", {"nodeId": name, "label": node["label"]}
 
         elif event_type == "on_chat_model_stream":
@@ -65,6 +68,10 @@ async def _translate_graph_events(graph, graph_input, config, meta):
                     first_val = next(iter(output.values()))
                     if isinstance(first_val, str) and first_val:
                         preview = first_val[:80] + ("..." if len(first_val) > 80 else "")
+                trace_step("node", "节点完成：" + node["label"], detail={
+                    "nodeId": name, "preview": preview,
+                    "outputKeys": list(output.keys()) if isinstance(output, dict) else None,
+                })
                 yield "node_done", {"nodeId": name, "preview": preview}
 
 
@@ -88,8 +95,15 @@ async def start_stream(body: dict):
         _active_workflows[thread_id] = {"graph": graph, "meta": meta, "config": config}
 
         _wf_started = time.time()
+        # 全链路追踪：工作流一次跑好几个节点，出问题时要能看出"卡/错在哪个节点"
+        trace = start_trace("workflow", question=meta.get("title") or workflow_id,
+                            meta={"workflowId": workflow_id, "threadId": thread_id})
+        trace.step("request", "启动工作流：" + (meta.get("title") or workflow_id), detail={
+            "workflowId": workflow_id, "threadId": thread_id, "input": input_data,
+            "nodes": [n["id"] for n in meta.get("nodes", [])],
+        })
         yield "start", {"threadId": thread_id, "workflowId": workflow_id,
-                        "resultNode": meta.get("resultNode")}
+                        "resultNode": meta.get("resultNode"), "runId": trace.run_id}
         logger.info("workflow: started", {"workflowId": workflow_id, "threadId": thread_id})
 
         # 用量记账：工作流的每个节点都是一次模型调用，用量挂在回调处理器上收集，
@@ -106,14 +120,28 @@ async def start_stream(body: dict):
         state = await graph.aget_state(config)
 
         if state.next:
+            trace.step("response", "工作流暂停（等待人工审核）", detail={
+                "nextNode": state.next[0], "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+            })
+            await trace.finish(summary={"status": "paused", "nextNode": state.next[0],
+                                        "inputTokens": input_tokens, "outputTokens": output_tokens})
             yield "paused", {
                 "threadId": thread_id,
                 "nextNode": state.next[0],
                 "intermediates": _get_intermediates(state.values, workflow_id),
+                "runId": trace.run_id,
             }
         else:
             result = state.values.get(meta["resultKey"], "")
-            yield "completed", {"threadId": thread_id, "result": result}
+            trace.step("response", "工作流完成", detail={
+                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                "resultChars": len(result or ""), "result": result,
+            })
+            await trace.finish(summary={"status": "completed", "inputTokens": input_tokens,
+                                        "outputTokens": output_tokens})
+            yield "completed", {"threadId": thread_id, "result": result,
+                                "runId": trace.run_id}
 
     return sse_stream(generator)
 
@@ -134,7 +162,16 @@ async def resume_stream(body: dict):
             await graph.aupdate_state(config, {"humanFeedback": feedback})
 
         logger.info("workflow: resumed", {"threadId": thread_id, "hasFeedback": bool(feedback)})
-        yield "resumed", {"threadId": thread_id, "resultNode": meta.get("resultNode")}
+        # 人工审核后继续跑：单独起一条 trace（这也是一次独立的请求）
+        trace = start_trace("workflow", question=(meta.get("title") or "") + "（人工补充后继续）",
+                            meta={"workflowId": meta.get("id"), "threadId": thread_id,
+                                  "resume": True})
+        trace.step("request", "工作流继续执行", detail={
+            "threadId": thread_id, "feedback": feedback,
+            "nextNode": None,
+        })
+        yield "resumed", {"threadId": thread_id, "resultNode": meta.get("resultNode"),
+                          "runId": trace.run_id}
 
         # 继续跑的这一段同样要记账：它是真正花钱的部分（剩下的几个节点都在这里跑完）
         started = time.time()
@@ -151,7 +188,14 @@ async def resume_stream(body: dict):
         record_api_call(feature="workflow", input_tokens=input_tokens, output_tokens=output_tokens,
                         latency_ms=round((time.time() - started) * 1000))
 
-        yield "completed", {"threadId": thread_id, "result": result}
+        trace.step("response", "工作流完成", detail={
+            "inputTokens": input_tokens, "outputTokens": output_tokens,
+            "resultChars": len(result or ""), "result": result,
+        })
+        await trace.finish(summary={"status": "completed", "inputTokens": input_tokens,
+                                    "outputTokens": output_tokens})
+
+        yield "completed", {"threadId": thread_id, "result": result, "runId": trace.run_id}
 
         _active_workflows.pop(thread_id, None)
         logger.info("workflow: completed", {"threadId": thread_id})

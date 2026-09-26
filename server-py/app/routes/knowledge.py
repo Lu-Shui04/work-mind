@@ -31,6 +31,7 @@ from app.services.rag.ingest import (
 from app.services.rag.query import SearchFilters, retrieve_with_meta
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
+from app.services.trace import start_trace
 from app.utils.logger import logger
 
 router = APIRouter()
@@ -132,6 +133,16 @@ async def search(body: dict, user: Annotated[User, Depends(current_user)]):
     )
     k = min(int(body.get("k") or 5), 20)
 
+    # 全链路追踪：检索验证同样是"一次提问"。它内部每一步（问句向量化 / 向量检索 / 重排）
+    # 都已经埋好点，这里只负责起一条 run 并在结束时报结论。
+    trace = start_trace("knowledge", question=question, tenant_id=user.tenant_id,
+                        user_id=user.user_id, user_name=user.name, meta={"kind": "检索验证"})
+    trace.step("request", "检索验证", detail={
+        "question": question, "k": k, "filters": filters.describe(),
+        "identity": {"userId": user.user_id, "departments": user.departments,
+                     "clearance": user.clearance},
+    })
+
     started = time.time()
     try:
         hits, recall = await retrieve_with_meta(question, user, k=k, filters=filters)
@@ -140,8 +151,15 @@ async def search(body: dict, user: Annotated[User, Depends(current_user)]):
     except ValueError as err:
         raise HTTPException(status_code=400, detail={"error": {"message": str(err)}})
 
+    trace.step("response", "检索结果", detail={
+        "hits": len(hits), "reason": recall.get("reason"),
+        "bestScore": recall.get("bestScore"), "titles": [h.get("title") for h in hits],
+    })
+    await trace.finish(summary={"hits": len(hits), "reason": recall.get("reason")})
+
     return {
         "hits": hits,
+        "runId": trace.run_id,
         "appliedFilters": filters.describe(),
         # 未命中时这里会直接说明原因（kb_empty / all_filtered / below_threshold）
         "recall": recall,

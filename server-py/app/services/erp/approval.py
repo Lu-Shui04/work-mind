@@ -133,13 +133,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _record_review_usage(handler: UsageMetadataCallbackHandler, started: float) -> dict:
-    """把这一次审批节点的模型用量记到看板（feature=erp）。"""
+def _record_review_usage(handler: UsageMetadataCallbackHandler, started: float,
+                         role_id: str = "", decision: str = "") -> dict:
+    """把这一次审批节点的模型用量记到看板（feature=erp），并记一步全链路追踪。"""
     from app.routes.monitor import record_api_call
+    from app.services.trace import trace_step
 
     input_tokens, output_tokens = sum_usage(handler.usage_metadata)
+    latency_ms = round((time.time() - started) * 1000)
     record_api_call(feature="erp", input_tokens=input_tokens, output_tokens=output_tokens,
-                    latency_ms=round((time.time() - started) * 1000))
+                    latency_ms=latency_ms)
+    # 追踪里带上"这个节点是谁、结论是什么" —— 审批链出问题时要看的就是它
+    trace_step("llm", "审批节点评审", duration_ms=latency_ms,
+               detail={"roleId": role_id, "inputTokens": input_tokens,
+                       "outputTokens": output_tokens, "decision": decision})
     return {"inputTokens": input_tokens, "outputTokens": output_tokens}
 
 
@@ -188,7 +195,7 @@ async def review_application(role_id: str, form_data: dict, form_type: str,
     if data["decision"] == "need_info" and not data["questions"]:
         data["questions"] = [data["reason"]]
     data["durationMs"] = round((time.time() - started) * 1000)
-    data["usage"] = _record_review_usage(handler, started)
+    data["usage"] = _record_review_usage(handler, started, role_id, data["decision"])
     data["roleId"] = role_id
     data["formView"] = view
     logger.info("erp: review done", {

@@ -597,12 +597,15 @@ Agent（每步模型调用累加）、工作流（整条图的 token）、ERP（
 用途和开发者盯终端看流程一样，区别是**可回看、可搜索、能对着某一条聊天记录打开**：
 一次请求 = 一行 `trace_runs`，一个步骤 = 一行 `trace_steps`（PostgreSQL，默认保留 7 天）。
 
+覆盖模块：对话助手、任务 Agent、RAG 知识库检索、内容工作流、ERP（填单 + 审批链）、Prompt 调试（单测 + A/B）。
+
 记录的步骤：
 `request`（收到提问/任务）→ `intent`（为什么查/不查知识库）→ `embedding`（问句向量化）
 → `vector_search`（过了权限过滤还剩多少候选、最高分、取回的 TopK）→ `rerank`（打分 / 跳过原因）
 → `retrieval`（命中几条、为什么没命中）→ `prompt`（组装后的 system prompt）
 → `cache`（命中 / 未命中）→ `route`（Agent 走哪条分支、为什么）→ `llm`（每次模型调用的耗时与产出）
-→ `tool_call` / `tool_result`（**工具入参与返回**）→ `response` / `error`（异常留档）。
+→ `tool_call` / `tool_result`（**工具入参与返回**）→ `node`（工作流节点进出）
+→ `response` / `error`（异常留档）。
 
 实现（`app/services/trace.py`）：
 - 用 **ContextVar** 传递追踪上下文（和 `current_user` 同一路子），

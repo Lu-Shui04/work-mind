@@ -15,6 +15,7 @@ from app.services.erp.approval import (
     APPROVAL_ROLES, plan_approval_flow, plan_reasons, review_application,
 )
 from app.services.erp.parser import check_compliance, parse_expense_form, parse_leave_form
+from app.services.trace import start_trace, trace_step
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
 
@@ -214,6 +215,10 @@ async def parse(body: dict):
     if form_type not in ("expense", "leave"):
         raise HTTPException(status_code=400, detail={"error": {"message": "formType 必须是 expense 或 leave"}})
 
+    # 全链路追踪：自然语言 → 结构化表单（提示词与模型返回都留档，便于查"为什么解析错了"）
+    trace = start_trace("erp", question=text, meta={"kind": "智能填单", "formType": form_type})
+    trace.step("request", "智能填单", detail={"text": text, "formType": form_type})
+
     try:
         if form_type == "expense":
             form = await parse_expense_form(text)
@@ -223,9 +228,15 @@ async def parse(body: dict):
             form = await parse_leave_form(text)
         # 用量由 parse_expense_form / parse_leave_form 内部按真实 token 记账
         # （这里原来记的是 0/0：调用次数对、费用永远是 ¥0）
-        return {"success": True, "form": form, "formType": form_type}
+        trace.step("response", "解析结果", detail={"form": form})
+        await trace.finish(summary={"formType": form_type,
+                                    "items": len(form.get("items") or []),
+                                    "warnings": len(form.get("warnings") or [])})
+        return {"success": True, "form": form, "formType": form_type, "runId": trace.run_id}
     except Exception as err:
         logger.error("erp: parse error", {"error": str(err)})
+        trace.fail("解析失败", err)
+        await trace.finish(status="error")
         raise HTTPException(status_code=500, detail={"error": {"message": "解析失败，请检查输入内容"}})
 
 
@@ -263,8 +274,18 @@ async def submit_stream(body: dict):
 
     async def generator():
         started = time.time()
+        # 全链路追踪：审批链每个节点的角色、结论、耗时都在里面
+        trace = start_trace("erp", question=(application["formData"].get("applicantName") or "") + " 的"
+                            + ("报销" if form_type == "expense" else "请假") + "申请",
+                            meta={"kind": "审批流", "appId": app_id, "formType": form_type})
+        trace.step("request", "提交申请", detail={
+            "appId": app_id, "formType": form_type, "formData": application["formData"],
+            "chain": [{"stepId": s["stepId"], "order": s["order"], "role": s["role"]}
+                      for s in application["chain"]],
+            "chainReason": application["chainReason"],
+        })
         yield "start", {"appId": app_id, "formType": form_type,
-                        "chainReason": application["chainReason"]}
+                        "chainReason": application["chainReason"], "runId": trace.run_id}
         yield "plan", {
             "approvers": [{"stepId": s["stepId"], "order": s["order"], "roleId": s["roleId"],
                            "role": s["role"]} for s in application["chain"]],
@@ -283,12 +304,21 @@ async def submit_stream(body: dict):
             yield event_type, data
 
         if result["status"] == "waiting_info":
+            trace.step("response", "审批暂停（等待人工补充材料）", detail={
+                "pendingStepId": application["pendingStepId"],
+            })
+            await trace.finish(summary={"status": "paused",
+                                        "pendingStepId": application["pendingStepId"]})
             yield "paused", {"appId": app_id, "stepId": application["pendingStepId"],
-                             "application": application}
+                             "application": application, "runId": trace.run_id}
         else:
             # 用量已由每个审批节点（review_application）按真实 token 记账，
             # 这里不再补一条"只有延迟、没有 token"的记录，避免同一次审批记两遍
-            yield "done", {"appId": app_id, "status": application["status"]}
+            trace.step("response", "审批结束", detail={"status": application["status"],
+                                                       "result": application.get("result")})
+            await trace.finish(summary={"status": application["status"]})
+            yield "done", {"appId": app_id, "status": application["status"],
+                           "runId": trace.run_id}
 
     return sse_stream(generator)
 
@@ -307,6 +337,13 @@ async def resume_stream(app_id: str, body: dict):
 
     async def generator():
         started = time.time()
+        # 全链路追踪：人工补料后继续评审，单独一条 run
+        trace = start_trace("erp", question="补充材料后继续审批：" + app_id,
+                            meta={"kind": "审批流（续）", "appId": app_id,
+                                  "formType": application["formType"]})
+        trace.step("request", "人工补充材料，继续审批", detail={
+            "appId": app_id, "stepId": step_id, "answer": answer, "formPatch": form_patch,
+        })
         # 1) 先落地人工补料（说明 + 修改后的申请数据）
         _apply_form_patch(application, form_patch)
         if answer or form_patch:
@@ -322,7 +359,8 @@ async def resume_stream(app_id: str, body: dict):
             yield "message", human_msg
 
         yield "resumed", {"appId": app_id, "stepId": step_id,
-                          "formData": application["formData"], "askRounds": step["askRounds"]}
+                          "formData": application["formData"], "askRounds": step["askRounds"],
+                          "runId": trace.run_id}
 
         # 2) 重新评审当前节点，并继续往后跑
         queue: list = []
@@ -337,12 +375,21 @@ async def resume_stream(app_id: str, body: dict):
             yield event_type, data
 
         if result["status"] == "waiting_info":
+            trace.step("response", "审批暂停（等待人工补充材料）", detail={
+                "pendingStepId": application["pendingStepId"],
+            })
+            await trace.finish(summary={"status": "paused",
+                                        "pendingStepId": application["pendingStepId"]})
             yield "paused", {"appId": app_id, "stepId": application["pendingStepId"],
-                             "application": application}
+                             "application": application, "runId": trace.run_id}
         else:
             # 用量已由每个审批节点（review_application）按真实 token 记账，
             # 这里不再补一条"只有延迟、没有 token"的记录，避免同一次审批记两遍
-            yield "done", {"appId": app_id, "status": application["status"]}
+            trace.step("response", "审批结束", detail={"status": application["status"],
+                                                       "result": application.get("result")})
+            await trace.finish(summary={"status": application["status"]})
+            yield "done", {"appId": app_id, "status": application["status"],
+                           "runId": trace.run_id}
 
     return sse_stream(generator)
 

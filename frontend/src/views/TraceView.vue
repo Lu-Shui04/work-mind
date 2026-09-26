@@ -20,6 +20,9 @@
           <option value="chat">对话助手</option>
           <option value="agent">任务 Agent</option>
           <option value="knowledge">RAG 知识库</option>
+          <option value="workflow">内容工作流</option>
+          <option value="erp">ERP 审批</option>
+          <option value="prompt">Prompt 调试</option>
         </select>
         <select v-model="filter.status" class="input" @change="loadRuns">
           <option value="">全部状态</option>
