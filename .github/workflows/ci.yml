@@ -1,0 +1,159 @@
+# .github/workflows/ci.yml
+# 每次 push / PR 都跑的自动化：语法检查 + 离线回归测试 + 前端构建 + 整栈冒烟。
+#
+# 设计原则：**这个 workflow 不花钱、也不需要任何密钥**（用假 key 启动，不真调模型）。
+# 需要真实模型的检查（故障注入、评测集）单独放在 evals.yml，手动或每晚触发 ——
+# 让每次 push 都能在几分钟内拿到确定的结论，而不是等模型配额、还要担心账单。
+name: CI
+
+on:
+  push:
+    branches: [main, master, py]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续 push 时取消上一个还在跑的任务：省 runner 时间，也避免结论互相覆盖
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 后端：离线回归测试（不联网、不连库、不花钱）──────────────────────
+  backend-tests:
+    name: 后端回归测试（离线）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: server-py/requirements.txt
+
+      - name: 安装依赖
+        run: pip install -r server-py/requirements.txt
+
+      - name: 语法检查（编译所有后端模块）
+        run: python -m compileall -q server-py/app
+
+      # 只有「离线用例」进这个 job：它们不该打网络、不该连数据库。
+      # test_fallback.py 要打真实上游，放到下面的 fault-injection（有密钥才跑）。
+      - name: 回归测试
+        working-directory: server-py
+        env:
+          # 假 key：构造模型对象需要它，但这些用例全程不发请求（构造 != 调用）
+          DEEPSEEK_API_KEY: sk-ci-dummy-not-used
+          ZHIPU_API_KEY: ci-dummy-not-used
+          MODEL_FALLBACK: 'off'
+          # 测试文件用 APP_DIR 把自己挂进 sys.path（本地跑时是容器里的 /app）
+          APP_DIR: ${{ github.workspace }}/server-py
+        run: |
+          set -euo pipefail
+          for t in tests/test_resilience.py tests/test_memory.py tests/test_agent_tools.py tests/test_parser_cross_page.py; do
+            echo "::group::$t"
+            python "$t"
+            echo "::endgroup::"
+          done
+
+  # ── 前端：构建能不能过 ──────────────────────────────────────────────
+  frontend-build:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 用 pnpm（Dockerfile 里也是 pnpm + --frozen-lockfile），
+      # 保证 CI 装出来的依赖和真正打镜像时一致
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: 安装依赖（按 lockfile，不许漂移）
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建
+        working-directory: frontend
+        run: pnpm build
+
+  # ── 整栈冒烟：镜像能不能建、compose 能不能起、健康检查通不通 ─────────
+  # 这一条价值很高：Dockerfile / requirements / compose 环境变量 / 新加的服务（如 Redis）
+  # 任何一处写错，这里立刻红 —— 而不是等部署时才发现。
+  compose-smoke:
+    name: 整栈冒烟（假 key 启动）
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: sk-ci-dummy-not-used
+      ZHIPU_API_KEY: ci-dummy-not-used
+      MODEL_FALLBACK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建并启动（db + redis + server + frontend）
+        run: docker compose up -d --build
+
+      - name: 等后端健康检查并核对接口
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS -m 5 http://127.0.0.1:3000/health/ >/dev/null 2>&1; then
+              echo "后端就绪（第 $i 次探测）"
+              break
+            fi
+            sleep 3
+          done
+          echo "--- /health/ ---"
+          curl -fsS http://127.0.0.1:3000/health/ | head -c 600; echo
+          echo "--- /health/resilience ---"
+          curl -fsS http://127.0.0.1:3000/health/resilience | head -c 600; echo
+          echo "--- 前端 ---"
+          curl -fsS -o /dev/null -w 'frontend=%{http_code}\n' http://127.0.0.1:5173/
+
+      - name: 失败时打印容器日志
+        if: failure()
+        run: docker compose logs --tail 120
+
+      - name: 清理
+        if: always()
+        run: docker compose down -v
+
+  # ── 故障注入：需要真实备用模型密钥，没配就自动跳过 ────────────────────
+  # 为什么单列一个 job：它要打真实上游（验证「主模型挂了真的会切智谱」）。
+  # Fork 出来的 PR 拿不到密钥，所以配了才跑、没配就明确跳过（不报红、也不假装通过）。
+  fault-injection:
+    name: 故障注入（需 ZHIPU_API_KEY）
+    runs-on: ubuntu-latest
+    env:
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+      DEEPSEEK_API_KEY: sk-ci-dummy-not-used
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 没有配置密钥 → 跳过
+        if: env.ZHIPU_API_KEY == ''
+        run: echo '未配置 ZHIPU_API_KEY，跳过故障注入测试（本地可用 bash scripts/run-tests.sh 跑）'
+
+      - uses: actions/setup-python@v5
+        if: env.ZHIPU_API_KEY != ''
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: server-py/requirements.txt
+
+      - name: 安装依赖
+        if: env.ZHIPU_API_KEY != ''
+        run: pip install -r server-py/requirements.txt
+
+      - name: 注入故障：主模型指向必死地址，验证降级到智谱
+        if: env.ZHIPU_API_KEY != ''
+        working-directory: server-py
+        env:
+          APP_DIR: ${{ github.workspace }}/server-py
+        run: python tests/test_fallback.py

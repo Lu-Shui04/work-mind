@@ -1,0 +1,105 @@
+# .github/workflows/evals.yml
+# 评测集：真实模型 + 真实知识库，跑 server-py/evals 下的 5 个集（69 条）。
+#
+# 为什么不放在 ci.yml 里每次 push 都跑：
+#   它要真调模型、真灌文档 —— 有成本、依赖外部配额，而且几十分钟起步。
+#   放进每次 push 只会让人把红当成噪声。所以做成**手动触发 + 每晚一次**。
+#
+# 前置：仓库 Secrets 里配好 DEEPSEEK_API_KEY（必需）、ZHIPU_API_KEY（嵌入/备用模型必需）。
+name: Evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 只跑某个评测集（rag_retrieval / intent / answer_grounding / agent_tasks / erp_parse），留空=全部
+        required: false
+        default: ''
+      verbose:
+        description: 打印每条用例的明细
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # UTC 18:00 = 北京时间次日 02:00：挑空闲时段跑（DeepSeek 空闲价是高峰价的一半）
+    - cron: '0 18 * * *'
+
+# 只读权限：评测只需要读代码 + 上传 artifact
+permissions:
+  contents: read
+
+jobs:
+  evals:
+    name: 评测集（真实模型）
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查密钥
+        if: env.DEEPSEEK_API_KEY == ''
+        run: |
+          echo "::error::未配置 DEEPSEEK_API_KEY（Settings → Secrets and variables → Actions）。"
+          echo "评测集要打真实模型，没有密钥跑不出任何有意义的结果。"
+          exit 1
+
+      - name: 启动整栈（db + redis + server + frontend）
+        run: docker compose up -d --build
+
+      - name: 等后端健康检查
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            if curl -fsS -m 5 http://127.0.0.1:3000/health/ >/dev/null 2>&1; then
+              echo "后端就绪（第 $i 次探测）"
+              break
+            fi
+            sleep 3
+          done
+          curl -fsS http://127.0.0.1:3000/health/ | head -c 400; echo
+
+      # 知识库是空的容器跑评测 = 一整套「检索不到内容」的假红，所以必须先灌文档。
+      # 该脚本按文件 sha256 幂等：重复执行不会重复入库、也不会重复计费。
+      - name: 灌入公司制度文档
+        run: bash scripts/seed-knowledge-base.sh
+
+      - name: 跑评测集
+        env:
+          SUITE: ${{ inputs.suite }}
+          VERBOSE: ${{ inputs.verbose }}
+        run: |
+          set -uo pipefail
+          ARGS=""
+          if [ -n "$SUITE" ]; then ARGS="--suite $SUITE"; fi
+          if [ "$VERBOSE" = "true" ]; then ARGS="$ARGS --verbose"; fi
+          echo "运行：bash scripts/run-evals.sh $ARGS"
+          bash scripts/run-evals.sh $ARGS
+
+      - name: 结果写进 Job Summary
+        if: always()
+        run: |
+          LATEST=$(ls -t server-py/evals/reports/*.md 2>/dev/null | head -1 || true)
+          if [ -n "$LATEST" ]; then
+            echo "## 评测报告" >> "$GITHUB_STEP_SUMMARY"
+            head -c 6000 "$LATEST" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "没有生成报告（评测未跑起来）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: 上传报告（JSON + Markdown）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports
+          path: server-py/evals/reports/
+          retention-days: 30
+
+      - name: 失败时打印后端日志
+        if: failure()
+        run: docker compose logs --tail 150 server
+
+      - name: 清理
+        if: always()
+        run: docker compose down -v

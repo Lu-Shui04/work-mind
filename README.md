@@ -620,6 +620,37 @@ curl http://localhost:3000/health/resilience
 见前文「用量看板」与「全链路追踪」两节：每次请求一行 run、每个步骤一行 step，
 重试/降级/熔断跳闸都会作为 `resilience` 步骤记进同一条链路 —— 排查时不用在日志里对时间。
 
+### 4. 持续集成（GitHub Actions）
+
+两个 workflow，分工的原则是：**每次 push 跑的必须「不花钱、结论确定」；需要真实模型的放手动/定时**。
+否则红点会变成噪声，谁都不看。
+
+#### `.github/workflows/ci.yml`（push / PR 触发，不需要任何密钥）
+
+| Job | 做什么 | 挡的是哪类事故 |
+|-----|--------|---------------|
+| `backend-tests` | 编译所有后端模块 + 跑 4 个离线回归测试（韧性 12 例、记忆 17 例、工具 54 例、解析用例） | 语法/依赖改动把模块改坏；韧性状态机被改错 |
+| `frontend-build` | `pnpm install --frozen-lockfile` + `pnpm build` | lockfile 与 package.json 漂移、前端编译不过 |
+| `compose-smoke` | 用**假 key** 建镜像并起整栈，核对 `/health/`、`/health/resilience`、前端 200 | Dockerfile/requirements/compose 环境变量写错、新加的服务（如 Redis）漏配 |
+| `fault-injection`（可选） | 配了 `ZHIPU_API_KEY` 才跑：把主模型指向必死地址，验证真的降级到智谱 | 降级链路配置写错（base_url/模型名）——单元测试全绿也发现不了 |
+
+这几个 job 的用例都是真实踩过的坑：本次工程化改动里就出现过「requirements 漏了 `redis` 包」
+「compose 少了一个服务」「pnpm-lock 与 package.json 不一致」这类问题，
+它们不会在本地立刻暴露，但会让「换台机器就起不来」。
+
+#### `.github/workflows/evals.yml`（手动触发 + 每晚 02:00）
+
+起整栈 → 灌公司制度文档（按 sha256 幂等，不重复计费）→ 跑 5 个评测集 69 条 →
+把报告写进 Job Summary 并作为 artifact 上传。需要仓库 Secrets 里配 `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`。
+
+本地等价命令：
+
+```bash
+bash scripts/run-tests.sh    # 后端全部回归测试（含故障注入）
+bash scripts/run-evals.sh    # 评测集
+```
+
+
 
 ## 八、接口一览
 
