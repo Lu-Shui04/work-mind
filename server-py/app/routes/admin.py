@@ -27,7 +27,7 @@ async def reset_all(user: User = Depends(current_user)):
     result = {
         # 会话记忆现在落在 PostgreSQL 上，重置要真的删库里的行（不再是清 dict）
         "chat": await chat_memory.clear_all(user.tenant_id),
-        "cache": cache.clear(),
+        "cache": await cache.clear(),
         "knowledge": knowledge,
         "vectors": {"clearedChunks": knowledge.get("chunks", 0)},
     }

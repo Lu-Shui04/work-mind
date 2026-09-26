@@ -8,6 +8,10 @@
 # 用法：
 #   bash scripts/run-tests.sh                              # 跑全部
 #   bash scripts/run-tests.sh tests/test_agent_tools.py    # 只跑指定文件
+#   bash scripts/run-tests.sh tests/test_resilience.py     # 只跑韧性单测（不联网）
+#
+# 注意：test_fallback.py 会打真实上游（智谱）验证降级链路，需要网络与 ZHIPU_API_KEY；
+# 只想跑离线用例时显式指定其它文件即可。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +29,9 @@ if [ -f .env ]; then ENV_ARGS=(--env-file .env); fi
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
 else
-  TARGETS=(tests/test_parser_cross_page.py tests/test_agent_tools.py tests/test_memory.py)
+  # 默认全集：解析/工具/记忆 + 韧性（不联网）+ 故障注入（要联网，验证降级真的能用）
+  TARGETS=(tests/test_parser_cross_page.py tests/test_agent_tools.py tests/test_memory.py
+           tests/test_resilience.py tests/test_fallback.py)
 fi
 
 for target in "${TARGETS[@]}"; do

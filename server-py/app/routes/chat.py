@@ -247,7 +247,7 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
 
             # ── 4) 缓存（必须带权限隔离域，否则会把 A 权限的答案发给 B）──
             scope = _cache_scope(user, sources)
-            cached = cache.get(system_prompt, message, scope)
+            cached = await cache.get(system_prompt, message, scope)
             # 组装好的 system prompt 是排查"回答为什么跑偏"的第一手材料，必须留档
             trace_step("prompt", "组装系统提示词", detail={
                 "systemPrompt": system_prompt,
@@ -330,7 +330,7 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             # 记住这一轮；超过阈值会自动异步压缩更早的对话（不阻塞本次回答）
             await append_turn(session_id, message, full_reply, user.tenant_id, user_id)
 
-            cache.set(system_prompt, message, full_reply, input_tokens + output_tokens, scope)
+            await cache.set(system_prompt, message, full_reply, input_tokens + output_tokens, scope)
 
             asyncio.create_task(
                 _safe_extract_profile(user_id, message, full_reply, user.tenant_id))

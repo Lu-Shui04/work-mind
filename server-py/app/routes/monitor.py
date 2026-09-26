@@ -158,7 +158,7 @@ async def reset_usage() -> dict:
         except Exception as err:  # noqa: BLE001
             logger.warn("monitor: 重置用量失败", {"error": str(err)})
     _recent.clear()
-    cache.stats = {"hits": 0, "misses": 0, "savedTokens": 0}
+    cache.reset_stats()
     return {"clearedCalls": cleared}
 
 

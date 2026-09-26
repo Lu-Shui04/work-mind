@@ -14,3 +14,5 @@ asyncpg>=0.29.0
 # 时区数据库：slim 镜像本身不带 /usr/share/zoneinfo，
 # 而 date 工具要靠 zoneinfo 按 APP_TIMEZONE 算"今天"（否则会退回 UTC，日期差一天）
 tzdata>=2024.1
+# 两级答案缓存的 L2（跨实例共享 + 重启不丢）；连不上会自动降级为纯进程内缓存
+redis>=5.0.0

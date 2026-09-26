@@ -30,6 +30,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── 答案缓存（Redis）───────────────────────────────────────────
+  # 为什么需要它：进程内缓存"多实例不共享、重启即失"——
+  # 起两个 worker 命中率直接减半，改一行代码重建容器后缓存全空、冷启动全打真模型。
+  # Redis 只做 L2（跨实例共享 + 重启不丢），L1 仍在进程内；
+  # 连不上时自动降级为纯 L1，不会因为缓存挂了让业务不可用。
+  redis:
+    image: redis:7-alpine
+    container_name: workmind-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6380}:6379"        # 宿主机用 6380，避开本机已有的 6379
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── 后端服务（Python / FastAPI）─────────────────────────────
   server:
     build:
@@ -84,11 +104,29 @@ services:
       - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-14}
       # 日期工具按这个时区算"今天"（容器默认 UTC，会比北京时间差一天）
       - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      # ── 韧性参数（超时 / 指数退避重试 / 熔断 / 降级）──────────────
+      # 单次调用超时；底层客户端超时略短于它，好让重试逻辑能接手
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-30}
+      - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
+      - LLM_RETRY_BASE_DELAY=${LLM_RETRY_BASE_DELAY:-0.5}
+      - LLM_RETRY_MAX_DELAY=${LLM_RETRY_MAX_DELAY:-8}
+      - TOOL_TIMEOUT=${TOOL_TIMEOUT:-20}
+      - TOOL_MAX_RETRIES=${TOOL_MAX_RETRIES:-1}
+      - BREAKER_FAIL_THRESHOLD=${BREAKER_FAIL_THRESHOLD:-5}
+      - BREAKER_RECOVERY_SECONDS=${BREAKER_RECOVERY_SECONDS:-30}
+      # 主模型不可用时的降级模型（复用知识库那个 ZHIPU_API_KEY）
+      - MODEL_FALLBACK=${MODEL_FALLBACK:-auto}
+      - FALLBACK_MODEL=${FALLBACK_MODEL:-glm-4-flash}
+      - FALLBACK_BASE_URL=${FALLBACK_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      # ── 缓存（L1 进程内 + L2 Redis）──────────────────────────────
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./server-py/uploads:/app/uploads   # 上传文件持久化
     depends_on:
       db:
         condition: service_healthy         # 等数据库就绪再起后端，避免首次启动建表失败
+      redis:
+        condition: service_started         # 缓存没起也能跑（自动降级），所以只等启动
 
   # ── 前端服务（Vue3 / Vite 构建 + Nginx 托管）───────────────────
   frontend:

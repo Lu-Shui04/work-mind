@@ -21,6 +21,10 @@ import httpx
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from app.services.resilience import (
+    TOOL_MAX_RETRIES, TOOL_TIMEOUT, BreakerOpenError, RetryExhaustedError,
+    call_with_resilience,
+)
 from app.utils.logger import logger
 
 # ── 时区 ────────────────────────────────────────────────────────
@@ -539,17 +543,43 @@ def reset_tool_call_log(token) -> None:
         pass
 
 
-def _repeat_guard(tool_obj):
-    """给工具套一层"完全相同参数只真正执行一次"的防护（未开启记录时不做任何事）。"""
+# 不重试的工具：**有副作用的调用重试等于重复执行**。
+# send_notify 真发出去一次就够了，重试可能给同一个人发两条通知 ——
+# 这类工具只做超时与熔断，不做重试（要幂等得靠调用方给幂等键，不是靠重试）。
+_NON_RETRYABLE_TOOLS = {"send_notify"}
+
+
+def _tool_event(kind: str, detail: dict) -> None:
+    """把工具的韧性事件写进日志 + 全链路追踪（没有追踪上下文时是空操作）。"""
+    logger.warn("tool resilience: " + kind, detail)
+    try:
+        from app.services.trace import trace_step
+        trace_step("resilience", f"工具韧性：{kind}",
+                   status="error" if kind in ("gave_up", "breaker_open") else "ok",
+                   detail=detail)
+    except Exception:  # noqa: BLE001 - 追踪不能影响工具执行
+        pass
+
+
+def _guard_tool(tool_obj):
+    """给工具套三层防护：重复调用拦截 → 超时 → 指数退避重试 → 熔断。
+
+    为什么工具也要熔断：某个上游（比如搜索服务）挂了的时候，
+    Agent 会连着调 5 次，每次都卡满超时 —— 一次任务光等待就烧掉 100 秒，
+    用户看到的是"Agent 一直在转圈"。跳闸之后立刻返回"这个工具现在不可用"，
+    模型可以改用别的工具或直接说明情况，而不是干等。
+    """
 
     # 关键：内部必须直接调原函数，不能走 tool_obj.ainvoke()。
     # 走 ainvoke 会在 ToolNode 里再起一个嵌套 runnable，astream_events 就会把
     # on_tool_start / on_tool_end 各发两遍 —— 前端步骤卡片直接翻倍（真实踩过）。
     # 参数已经由外层（同一个 args_schema）校验过，这里直接执行是安全的。
     inner = tool_obj.coroutine or tool_obj.func
+    max_retries = 0 if tool_obj.name in _NON_RETRYABLE_TOOLS else TOOL_MAX_RETRIES
 
     @tool(tool_obj.name, args_schema=tool_obj.args_schema, description=tool_obj.description)
     async def guarded(**kwargs) -> str:
+        # ① 重复调用拦截（完全相同参数只真正执行一次）
         log = _tool_call_log.get()
         if log is not None:
             key = tool_obj.name + "|" + json.dumps(kwargs, ensure_ascii=False, sort_keys=True,
@@ -560,10 +590,30 @@ def _repeat_guard(tool_obj):
                         "结果与上次完全一样。请基于已有信息继续，或换一个真正不同的参数；"
                         "不要把步数花在重复调用上。")
             log[key] = True
-        return await inner(**kwargs)
+
+        # ② 超时 + 指数退避重试 + 熔断
+        async def _call():
+            return await inner(**kwargs)
+
+        try:
+            return await call_with_resilience(
+                _call, name=f"tool:{tool_obj.name}",
+                timeout=TOOL_TIMEOUT, retries=max_retries,
+                breaker_name=f"tool:{tool_obj.name}", on_event=_tool_event,
+            )
+        except (RetryExhaustedError, BreakerOpenError) as err:
+            # 不给模型抛异常（抛了整条 Agent 就断了），而是回一句**能行动**的说明：
+            # 工具失败了、失败在哪、现在该干什么。
+            reason = str(err)
+            if isinstance(err, BreakerOpenError):
+                hint = ("该工具连续失败已暂时停用（熔断），这段时间不要再调用它；"
+                        "请改用其它工具，或直接基于已获得的信息给出回答并说明哪部分没能查到。")
+            else:
+                hint = "请换一个参数/关键词再试，或改用其它工具；不要用完全相同的参数反复重试。"
+            return (f"（工具 {tool_obj.name} 调用失败）{reason}\n{hint}")
 
     return guarded
 
 
 # 图里用带防护的版本；all_tools 保持原始对象（工具清单 / 接口 / 测试都用它）
-guarded_tools = [_repeat_guard(t) for t in all_tools]
+guarded_tools = [_guard_tool(t) for t in all_tools]

@@ -113,6 +113,19 @@ async def on_startup():
     # 日预算存在 app_settings 里，启动时读回来（否则重建容器后悄悄变回默认值）
     from app.routes.monitor import load_budget
     await load_budget()
+    # 缓存：**主动探一次 Redis**，把"用的是 redis+l1 还是降级成 memory-only"在启动日志里说清楚。
+    # 缓存挂了不该阻止启动，但必须让人一眼看到（而不是等用户抱怨命中率掉了才发现）。
+    from app.services.cache import cache
+    from app.services.resilience import health_snapshot
+    await cache._get_redis()          # noqa: SLF001 - 启动自检，故意提前触发连接
+    snapshot = health_snapshot()
+    logger.info("resilience: ready", {
+        "cache": cache.get_stats()["backend"],
+        "breakers": len(snapshot["breakers"]),
+        "config": snapshot["config"],
+    })
+    print(f"   缓存: {cache.get_stats()['backend']}"
+          f"（L1 进程内 + L2 Redis，Redis 不可用时自动降级）")
     logger.info("server started", {"port": config.app.port, "env": config.app.env})
     print("\n🚀 WorkMind Server (FastAPI) 已启动")
     print(f"   地址: http://localhost:{config.app.port}")
@@ -121,4 +134,6 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    from app.services.cache import cache
+    await cache.close()      # 关掉 Redis 连接，别让连接池悬着
     await close_db()

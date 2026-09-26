@@ -559,18 +559,69 @@ bash scripts/check-web-search.sh    # 自检：现在真搜还是演示数据，
   「3天，共580元」被过滤成 `3580`，直接算出一个错答案且毫无提示。现在归一化不掉的输入一律明确报错，
   求值也换成了 AST 白名单（不允许 `**`，避免 `9**9**9` 把进程算死）。
 
-### 跑后端测试
+### 跑后端测试与评测集
 
-```
-bash scripts/run-tests.sh                              # 全部
+```bash
+bash scripts/run-tests.sh                              # 全部回归测试
 bash scripts/run-tests.sh tests/test_agent_tools.py    # 只跑 Agent 工具
+bash scripts/run-tests.sh tests/test_resilience.py     # 只跑韧性单测（不联网，12 个用例）
+bash scripts/run-evals.sh                              # 跑评测集（见 server-py/evals/README.md）
 ```
 
-脚本把 `server-py` 挂进镜像里跑，改完代码不用重新构建；`docker exec workmind-server python /app/tests/test_agent_tools.py`
+脚本把 `server-py` 挂进镜像里跑，改完代码不用重新构建；`docker exec workmind-server python /app/tests/xxx.py`
 也可以（镜像里已经带了 `tests/`）。
 
+| 测试文件 | 覆盖什么 | 要不要联网 |
+|---------|---------|-----------|
+| `tests/test_resilience.py` | 韧性状态机：退避与抖动、可重试判定、超时、熔断开/半开/合、取消不算失败、指标 | 否 |
+| `tests/test_fallback.py` | **故障注入**：把主模型指向必死地址，验证真的降级到智谱、流式降级、跳闸后不再等超时 | 是（打真实上游） |
+| `tests/test_memory.py` / `test_agent_tools.py` / `test_parser_cross_page.py` | 会话记忆、Agent 工具、PDF 跨页解析 | 否 |
 
-## 七、接口一览
+评测集（`server-py/evals/`）：RAG 检索、意图判定、回答依据、Agent 工具、ERP 解析共 5 个集，
+逐条判定并输出通过率 / 平均与 P95 耗时 / 失败明细（JSON + Markdown 报告）。
+
+
+## 七、工程化：韧性、缓存与可观测
+
+### 1. 韧性四件套（`server-py/app/services/resilience.py`）
+
+| 能力 | 做什么 | 为什么必须有 |
+|------|--------|-------------|
+| **超时** | 每次模型/工具调用都有上限（`LLM_TIMEOUT` / `TOOL_TIMEOUT`） | 没有超时的重试不是更可靠，而是把一次抖动放大成雪崩 |
+| **指数退避重试 + 抖动** | 只重试超时/连接/429/5xx；等待 `min(MAX, BASE×2^n)` 再叠加随机抖动 | 上游 429/502 隔几百毫秒重试通常就好了；抖动防止一批请求齐步重试（惊群） |
+| **熔断** | 连续失败达阈值 → 跳闸，后续请求**不碰上游**直接降级；冷却后半开探测 | 上游真挂了时，重试只会让每个用户都卡满超时（实测跳闸后 4ms vs 超时 2s） |
+| **降级** | 主模型（DeepSeek）不可用 → 智谱 GLM 顶上；都不可用则明确报错 | 用户要的是「能回答」，不是「哪个厂商在服务」 |
+
+工具侧同样有这三层，并且**有副作用的工具（发通知）不重试** —— 重试等于重复执行。
+工具失败时不会把异常抛给 Agent（那会直接打断整条任务），而是回一句**可行动**的说明：
+失败了、失败在哪、现在该换个参数还是改用别的工具。
+
+熔断器按资源名（`model:deepseek-chat` / `tool:web_search`）注册单例，状态可查：
+
+```bash
+curl http://localhost:3000/health/resilience
+# { counters: {calls, retries, timeouts, fallbacks, breakerRejected...},
+#   breakers: [{name, state: closed|open|half_open, totalFailures, recoverInSec, lastError}],
+#   config: {...} }
+```
+
+### 2. 两级答案缓存（`app/services/cache.py`）
+
+- **L1 进程内**：最热的问答走这里，不跨进程、不序列化；
+- **L2 Redis**：跨实例共享 + **重启不丢**（TTL 由 Redis 自己过期）；
+- **Redis 不可用自动降级为纯 L1**：缓存是加速手段，不能因为它挂了让业务不可用；
+  降级状态在 `health.cache.backend`（`redis+l1` / `memory-only`）里如实标注。
+
+实测（同一句问题，中间重启一次服务）：第一次 MISS → 第二次命中（L1）→ **重启后再问仍然命中（L2）**，
+`l2Hits=1`。缓存键带权限隔离域（租户+部门+密级+命中切片），不会把 A 权限的答案发给 B。
+
+### 3. 全链路追踪与用量看板
+
+见前文「用量看板」与「全链路追踪」两节：每次请求一行 run、每个步骤一行 step，
+重试/降级/熔断跳闸都会作为 `resilience` 步骤记进同一条链路 —— 排查时不用在日志里对时间。
+
+
+## 八、接口一览
 
 | 路由前缀 | 功能 |
 |---------|------|
@@ -583,6 +634,7 @@ bash scripts/run-tests.sh tests/test_agent_tools.py    # 只跑 Agent 工具
 | `/api/prompt/*` | Prompt 单测(流式)、A/B 测试(流式 `POST /api/prompt/ab-test/stream`)、模板管理 |
 | `/api/monitor/*` | 用量看板：调用统计、Token、成本、缓存命中率（`GET /stats`、`POST /reset`、`PUT /budget`） |
 | `/api/trace/*` | 全链路追踪：`GET /runs`（列表/筛选/搜索）、`GET /runs/{runId}`（完整时间线）、`GET /stats`、`DELETE /runs` |
+| `GET /health/resilience` | 韧性可观测快照：熔断器状态、重试/超时/降级计数、缓存后端与命中率 |
 
 用量看板的数据来源是 **每一次模型调用写一行 `usage_calls`**（PostgreSQL），
 `GET /api/monitor/stats` 从库里聚合；数据库不可用时降级为进程内统计，
@@ -658,7 +710,7 @@ data: <json>
 { "error": { "code": "...", "message": "...", "retryable": false } }
 ```
 
-## 八、常见问题
+## 九、常见问题
 
 **Q: 启动时报错 `❌ 缺少 DEEPSEEK_API_KEY`？**
 `.env` 里没填 `DEEPSEEK_API_KEY`，对话/Agent/工作流/ERP 等所有调用大模型的功能都依赖它，必须配置。
