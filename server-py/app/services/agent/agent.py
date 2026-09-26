@@ -153,7 +153,14 @@ async def classify_task(task: str) -> _RouteDecision:
             {"role": "user", "content": task},
         ])
     except Exception as err:
+        # 这里**静默**回退成 tool：模型路由器挂了不会让任务失败，但会让"纯知识问答走知识分支"
+        # 这条策略悄悄失效。实测就吃过一次亏 —— 模型外壳的参数名冲突导致路由 100% 失败，
+        # 表现只是"回答质量好像变差了"，没人发现。所以除了日志，还要在**全链路追踪**里留痕。
         logger.warn("agent: classify failed, fallback to tool", {"error": str(err)})
+        trace_step("route", "任务路由失败，回退到工具分支", status="error",
+                   detail={"error": f"{type(err).__name__}: {err}"[:300],
+                           "fallbackRoute": "tool",
+                           "impact": "本应走知识分支的任务会改走工具分支，回答质量可能下降"})
         return _RouteDecision(route="tool", reason="分类失败，回退到工具执行路径", search_query=task)
 
 

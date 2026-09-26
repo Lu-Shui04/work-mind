@@ -158,14 +158,20 @@ class ResilientModel(Runnable):
                 yield chunk
 
     # ── 反射式委托：bind_tools / with_structured_output ────────────
-    def _delegate(self, method: str, *args, **kwargs) -> "ResilientModel":
+    def _delegate(self, op: str, /, *args, **kwargs) -> "ResilientModel":
         """在主/备模型上各调一次同名方法，结果继续用同一套韧性包住。
 
         这样外壳**不需要知道** bind_tools / with_structured_output 具体做什么
         （哪怕以后换别的模型类、多出别的方法也一样能用）。
+
+        ⚠️ op 必须是**位置限定参数**（那个 `/`）：被委托的方法自己也可能有
+        `method=` 这类关键字参数（`with_structured_output(schema, method="function_calling")`），
+        如果这里也叫 `method`，就会撞成
+        `_delegate() got multiple values for argument 'method'` —— 实测把
+        ERP 填单、任务路由、AI 预填全打挂了（而且任务路由是**静默**回退，最难发现）。
         """
-        primary = getattr(self.primary, method)(*args, **kwargs)
-        fallback = (getattr(self.fallback, method)(*args, **kwargs)
+        primary = getattr(self.primary, op)(*args, **kwargs)
+        fallback = (getattr(self.fallback, op)(*args, **kwargs)
                     if self.fallback is not None else None)
         return ResilientModel(primary, fallback, primary_label=self.primary_label,
                               fallback_label=self.fallback_label,
