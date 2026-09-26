@@ -78,7 +78,7 @@
                 <!-- 两个分数含义不同：向量分=整体语义像不像；重排分=能不能回答这个问题 -->
                 <span class="ks-score" :title="scoreTitle(s)">
                   {{ (s.score * 100).toFixed(0) }}%
-                  <span v-if="s.rerankScore != null" class="ks-rr">重排 {{ s.rerankScore }}</span>
+                  <span v-if="s.rerankScore != null" class="ks-rr">重排 {{ fmtRerank(s.rerankScore) }}</span>
                 </span>
               </button>
 
@@ -108,9 +108,15 @@ const props = defineProps({
 
 // 分数说明：向量召回分（0-1）与重排分（LLM 打分 0-10 / cross-encoder 0-1）不是一回事，
 // 鼠标悬停时说清楚，避免把"重排 2 分"误读成"相似度 2%"
+// 重排分有两种量纲：cross-encoder（bge/jina/cohere）是 0-1，LLM 打分是 0-10
+function fmtRerank(v) {
+  if (v == null) return ''
+  return v <= 1 ? Math.round(v * 100) + '%' : v + '/10'
+}
+
 function scoreTitle(s) {
   const parts = ['向量相似度 ' + (s.score * 100).toFixed(1) + '%（整体语义接近程度）']
-  if (s.rerankScore != null) parts.push('重排分 ' + s.rerankScore + '（能否直接回答这个问题，由重排模型判定）')
+  if (s.rerankScore != null) parts.push('重排分 ' + fmtRerank(s.rerankScore) + '（能否直接回答这个问题，由重排模型判定）')
   return parts.join('；')
 }
 

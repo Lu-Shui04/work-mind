@@ -119,7 +119,7 @@
       <div v-for="(h, i) in sp.hits" :key="h.chunkId" class="hit">
         <div class="hit-head">
           <span class="score">{{ h.score }}</span>
-          <span v-if="h.rerankScore != null" class="rr" :title="'重排分：能否直接回答该问题（向量分只表示整体语义接近）'">重排 {{ h.rerankScore }}</span>
+          <span v-if="h.rerankScore != null" class="rr" :title="'重排分：能否直接回答该问题（向量分只表示整体语义接近）'">重排 {{ fmtRerank(h.rerankScore) }}</span>
           <span class="hit-title">{{ h.title }}</span>
           <span class="loc">{{ h.pageLabel || (h.pageNumber ? '第' + h.pageNumber + '页' : '无页码') }}</span>
           <span class="etype" :class="h.elementType">{{ elementLabel(h.elementType) }}</span>
@@ -219,6 +219,12 @@ function visibilityText(d) {
   if (d.security_level === 'confidential') return `仅「${dept}」且持机密授权的身份可见`
   if (d.department === 'general') return '全员可见（部门=全员通用 + 密级=内部）'
   return `仅「${dept}」成员可见（密级=内部）`
+}
+
+// 重排分两种量纲：cross-encoder 0-1，LLM 0-10
+function fmtRerank(v) {
+  if (v == null) return ''
+  return v <= 1 ? Math.round(v * 100) + '%' : v + '/10'
 }
 
 const pageLabel = (c) => (c.page_end && c.page_end !== c.page_number)
