@@ -25,6 +25,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from app.schemas.document import DocumentRecord
 from app.services.identity import SqlParams, User, can_view, doc_visibility_sql, version_visible
 from app.services.model import chat_model, embeddings
+from app.services.rag import rerank
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
 from app.utils.logger import logger
@@ -156,7 +157,10 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
         doc_type=filters.doc_type, doc_ids=filters.doc_ids,
         include_superseded=filters.include_superseded, params=p,
     )
-    results, sql_meta = await store.search(query_vec, where_sql=where_sql, params=p.values, k=k)
+    # 开启重排时放宽向量召回池（宽召回 → 精排 → 取前 k）：
+    # 向量只负责"别漏"，排序交给重排模型，这是重排能提效果的前提
+    pool_k = rerank.pool_size(k)
+    results, sql_meta = await store.search(query_vec, where_sql=where_sql, params=p.values, k=pool_k)
 
     # 最终裁决：命中后再用 Python 的 can_view / version_visible 复核一遍（安全底线不依赖 SQL 单点）
     docs_meta = await registry.get_many([c.doc_id for c, _ in results])
@@ -175,6 +179,8 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
             "docId": chunk.doc_id,
             "content": chunk.text,
             "score": round(score, 3),
+            # 重排分（下面填充）：向量分只说明"整体像"，重排分才说明"能不能回答"
+            "rerankScore": None,
             "title": doc.document_title if doc else "未知来源",
             # 引用溯源：页码区间 + 结构类型 + 顺位，前端可据此高亮原文
             "pageNumber": chunk.page_number,
@@ -193,6 +199,20 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
             "fileName": doc.file_name if doc else None,
             "preview": chunk.text[:80].replace("\n", " ") + "...",
         })
+
+    # ── 重排：cross-encoder / LLM 逐条读"查询+片段"，把真正能回答的排到前面 ──
+    # 实测向量分对"同主题但不回答该问题"的切片几乎没有区分度（差 0.02~0.05），
+    # 这一步是 Top1 准确率的主要来源。失败就保留向量序（fail-open），不影响可用性。
+    rerank_meta: dict = {"applied": False, "provider": rerank.PROVIDER, "pool": pool_k}
+    if rerank.is_enabled() and len(hits) > 1:
+        scores = await rerank.rerank(question, [h["content"] for h in hits])
+        if scores:
+            for h, s in zip(hits, scores):
+                h["rerankScore"] = round(s, 3)
+            hits.sort(key=lambda h: (-(h.get("rerankScore") if h.get("rerankScore") is not None else -1),
+                                     -h["score"]))
+            rerank_meta.update({"applied": True, "candidates": len(scores)})
+    hits = hits[:k]
 
     # ── 未命中原因诊断：把"没查到"翻译成人能直接行动的三类原因 ──────────
     candidates = sql_meta.get("candidates", 0)
@@ -225,6 +245,7 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
         "departmentHint": hint,
         "departmentHintMatched": hint_matched,
         "appliedFilters": filters.describe(),
+        "rerank": rerank_meta,
     }
 
     logger.info("rag: retrieve", {

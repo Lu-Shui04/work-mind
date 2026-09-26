@@ -108,6 +108,9 @@
         <span>身份 {{ sp.diagnostics.user.userId }}（{{ sp.diagnostics.user.departments.join('/') }} · {{ sp.diagnostics.user.clearance }}）</span>
         <span>过滤 {{ filterDesc }}</span>
         <span v-if="sp.diagnostics.storage">存储 {{ sp.diagnostics.storage.backend }}</span>
+        <span v-if="sp.recall?.rerank">
+          重排 {{ sp.recall.rerank.applied ? '✓ ' + sp.recall.rerank.provider + '（池 ' + sp.recall.rerank.pool + '）' : '未启用' }}
+        </span>
       </div>
       <!-- 未命中时把原因摆出来，不用再靠翻代码判断是"没入库"还是"阈值太高" -->
       <div v-if="sp.diagnostics && !sp.hits.length && sp.diagnostics.explain" class="diag-reason">
@@ -116,6 +119,7 @@
       <div v-for="(h, i) in sp.hits" :key="h.chunkId" class="hit">
         <div class="hit-head">
           <span class="score">{{ h.score }}</span>
+          <span v-if="h.rerankScore != null" class="rr" :title="'重排分：能否直接回答该问题（向量分只表示整体语义接近）'">重排 {{ h.rerankScore }}</span>
           <span class="hit-title">{{ h.title }}</span>
           <span class="loc">{{ h.pageLabel || (h.pageNumber ? '第' + h.pageNumber + '页' : '无页码') }}</span>
           <span class="etype" :class="h.elementType">{{ elementLabel(h.elementType) }}</span>
@@ -400,6 +404,11 @@ watch(() => knStore.selectedId, () => {
 .hit { border: 1px solid var(--color-border-light); border-radius: var(--radius-md); padding: 8px 10px; margin-bottom: 8px; }
 .hit-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; margin-bottom: 5px; }
 .score { font-family: var(--font-mono); font-weight: 600; color: var(--color-success); }
+.rr {
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: var(--color-primary-dark); background: var(--color-primary-bg);
+  border-radius: var(--radius-full); padding: 0 6px;
+}
 .hit-title { font-weight: 600; color: var(--color-text); font-size: 12px; }
 .hit-tag { color: var(--color-text-muted); }
 .hit-text { font-size: 11.5px; color: var(--color-text-sub); line-height: 1.6; white-space: pre-wrap; }

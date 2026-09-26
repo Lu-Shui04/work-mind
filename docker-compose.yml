@@ -55,6 +55,14 @@ services:
       - RAG_ANSWER_POLICY=${RAG_ANSWER_POLICY:-grounded}
       # 意图识别策略：recall_first（默认，默认就查库）/ strict（旧的严格模式）
       - RAG_INTENT_MODE=${RAG_INTENT_MODE:-recall_first}
+      # 重排：llm=用 DEEPSEEK_API_KEY 打分（默认）/ bge=专用 rerank 接口 / none=关闭
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-llm}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-https://api.siliconflow.cn/v1}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+      - RERANK_POOL_MULT=${RERANK_POOL_MULT:-3}
+      - RERANK_MAX_CANDIDATES=${RERANK_MAX_CANDIDATES:-12}
+      - RERANK_MAX_CHARS=${RERANK_MAX_CHARS:-600}
     volumes:
       - ./server-py/uploads:/app/uploads   # 上传文件持久化
     depends_on:

@@ -75,7 +75,11 @@
                   {{ s.headingPath.join(' › ') }}
                 </span>
                 <span class="ks-meta">{{ deptLabel(s.department) }} · {{ s.version }}</span>
-                <span class="ks-score" :title="'相似度 ' + s.score">{{ (s.score * 100).toFixed(0) }}%</span>
+                <!-- 两个分数含义不同：向量分=整体语义像不像；重排分=能不能回答这个问题 -->
+                <span class="ks-score" :title="scoreTitle(s)">
+                  {{ (s.score * 100).toFixed(0) }}%
+                  <span v-if="s.rerankScore != null" class="ks-rr">重排 {{ s.rerankScore }}</span>
+                </span>
               </button>
 
               <div v-if="openChunks[s.chunkId]" class="ks-content">
@@ -101,6 +105,14 @@ import 'highlight.js/styles/github-dark.css'
 const props = defineProps({
   message: { type: Object, required: true },
 })
+
+// 分数说明：向量召回分（0-1）与重排分（LLM 打分 0-10 / cross-encoder 0-1）不是一回事，
+// 鼠标悬停时说清楚，避免把"重排 2 分"误读成"相似度 2%"
+function scoreTitle(s) {
+  const parts = ['向量相似度 ' + (s.score * 100).toFixed(1) + '%（整体语义接近程度）']
+  if (s.rerankScore != null) parts.push('重排分 ' + s.rerankScore + '（能否直接回答这个问题，由重排模型判定）')
+  return parts.join('；')
+}
 
 // 引用来源默认收起（回答本身才是主角），点标题行展开明细
 const showSources = ref(false)
@@ -400,7 +412,11 @@ const renderedContent = computed(() => {
   color: var(--color-text-muted); font-size: 10.5px;
   max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ks-score { margin-left: auto; color: var(--color-success); font-family: var(--font-mono); }
+.ks-score { margin-left: auto; color: var(--color-success); font-family: var(--font-mono); white-space: nowrap; }
+.ks-rr {
+  color: var(--color-primary-dark); background: var(--color-primary-bg);
+  border-radius: var(--radius-full); padding: 0 5px; margin-left: 4px;
+}
 
 /* 打字机光标 */
 .cursor-blink {
