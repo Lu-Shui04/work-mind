@@ -89,7 +89,8 @@
             </button>
 
             <div v-if="isSourcesOpen(task.id)" class="as-list">
-              <div v-for="(s, i) in task.sources" :key="s.chunkId" class="agent-source">
+              <div v-for="(s, i) in task.sources" :key="s.chunkId" class="agent-source"
+                   :data-chunk-id="s.chunkId">
                 <div class="as-row" @click="toggleSource(task.id, i)">
                   <span class="as-idx">[{{ i + 1 }}]</span>
                   <span class="as-title">{{ s.title }}</span>
@@ -127,7 +128,11 @@
               <span>最终回答</span>
               <button class="btn-copy" @click="copyAnswer(task.answer)">复制</button>
             </div>
-            <div class="answer-content markdown-body" v-html="renderMd(task.answer)" />
+            <!-- 回答里的 [1] [2] 是知识库引用编号，渲染成可点击的蓝色角标：
+                 点一下展开下方"引用来源"并跳到对应那条（v-html 里的元素只能用事件委托） -->
+            <div class="answer-content markdown-body"
+                 v-html="renderAnswer(task)"
+                 @click="onAnswerClick($event, task)" />
             <span v-if="task.status === 'running' && task.answer" class="cursor-blink" />
           </div>
           <div v-if="task.status === 'error'" class="error-hint">{{ task.answer || '任务执行失败，请重试' }}</div>
@@ -143,6 +148,7 @@ import hljs from 'highlight.js'
 import { useAgentStore } from '@/stores/agent.js'
 import { useAppStore } from '@/stores/app.js'
 import ToolCallCard from '@/components/agent/ToolCallCard.vue'
+import { citeIndexFromEvent, decorateCitations, findSourceNode, revealNode } from '@/utils/citations.js'
 
 const agentStore = useAgentStore()
 const appStore   = useAppStore()
@@ -153,6 +159,10 @@ const taskListEl = ref(null)
 
 marked.setOptions({ highlight: (c, l) => l && hljs.getLanguage(l) ? hljs.highlight(c, { language: l }).value : c, breaks: true })
 function renderMd(t) { try { return marked(t || '') } catch { return t } }
+// 最终回答：Markdown 渲染 + 把 [1] 这类引用编号变成可点击角标
+function renderAnswer(task) {
+  return decorateCitations(renderMd(task?.answer), task?.sources)
+}
 function formatTime(iso) { return iso ? new Date(iso).toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit', second:'2-digit' }) : '' }
 async function runTask() {
   if (!taskText.value.trim() || agentStore.running) return
@@ -175,6 +185,22 @@ const isSourceOpen = (id, i) => !!openItems[`${id}-${i}`]
 const toggleSource = (id, i) => { openItems[`${id}-${i}`] = !openItems[`${id}-${i}`] }
 const bestSourceScore = (task) =>
   Math.max(0, ...(task.sources || []).map((s) => Math.round((s.score || 0) * 100)))
+
+// 点回答里的 [1] → 展开这条任务的引用区 + 展开那一小条原文 + 滚过去闪一下
+async function onAnswerClick(event, task) {
+  const idx = citeIndexFromEvent(event)
+  if (idx < 0) return
+  const source = (task.sources || [])[idx]
+  if (!source) return
+  // ⚠️ 必须在 await 之前把 DOM 取出来：事件派发结束后 currentTarget 会被置回 null，
+  //    在 await 之后再读它会抛 "Cannot read properties of null (reading 'closest')"，
+  //    结果就是引用框展开了、但既不滚动也不高亮（实测踩到过）。
+  const card = event.currentTarget && event.currentTarget.closest('.task-block')
+  openSources[task.id] = true
+  openItems[task.id + '-' + idx] = true
+  await nextTick()
+  revealNode(findSourceNode(card, source.chunkId))
+}
 
 // ── 新任务在列表末尾，自动跟到最新一次执行 ─────────────────────
 function scrollToBottom() {

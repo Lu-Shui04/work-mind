@@ -193,10 +193,12 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             if sources:
                 context_block = (
                     "\n\n【企业知识库资料】以下内容已按当前用户权限过滤，是本轮回答的**唯一依据**：\n"
-                    "1. 只依据这些资料回答，并在引用处标注【来源：文档标题 · 第N页】\n"
+                    "1. 只依据这些资料回答；引用时在句末直接写方括号编号，例如 [1] 或 [1][3]，"
+                    "编号就是每段资料开头标注的序号。**不要写【来源：文档标题 · 第N页】这种长句**"
+                    "（前端会把编号渲染成可点击的小角标，长句会打断阅读）\n"
                     "2. 资料不足以回答的部分，明确说\"知识库中未找到相关内容\"，"
                     "**不要用你自己的知识补充、推测或举一反三**\n"
-                    "3. 资料之间如果有冲突，指出冲突并标注各自来源\n"
+                    "3. 资料之间如果有冲突，指出冲突并分别标注编号\n"
                     + build_context(sources)
                 )
             system_prompt = (body.systemPrompt or base_system) + profile_ctx + context_block

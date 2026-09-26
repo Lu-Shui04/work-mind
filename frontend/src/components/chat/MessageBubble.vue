@@ -6,7 +6,7 @@
           （后端 sources[].content 就是喂给模型的那段原文，不是摘要）
      注：原先的"复制/重新生成/赞/踩"按钮已按要求移除 -->
 <template>
-  <div class="message-wrap" :class="message.role">
+  <div ref="rootEl" class="message-wrap" :class="message.role">
     <!-- 用户消息 -->
     <div v-if="message.role === 'user'" class="user-msg">
       <div class="bubble user-bubble">{{ message.content }}</div>
@@ -36,10 +36,14 @@
         <!-- 未命中要能自证原因：库空 / 被权限过滤 / 分数低于阈值，处理方式完全不同 -->
         <div v-if="showRecallDetail" class="kb-recall">{{ recallDetail }}</div>
 
-        <!-- 消息内容（Markdown 渲染） -->
+        <!-- 消息内容（Markdown 渲染）。
+             回答里的 [1] [2] 会被渲染成可点击的蓝色角标（见 utils/citations.js），
+             点一下展开下方"引用来源"并跳到对应那条 —— v-html 注入的元素绑不上 Vue 事件，
+             所以点击统一委托到这个容器上。 -->
         <div
           class="bubble ai-bubble markdown-body"
           v-html="renderedContent"
+          @click="onContentClick"
         />
 
         <!-- 流式输出时的光标 -->
@@ -64,7 +68,8 @@
             </div>
 
             <!-- 每条引用独立展开：点开看命中的原文 chunk 全文（就是喂给模型的那段） -->
-            <div v-for="(s, i) in message.sources" :key="s.chunkId" class="kb-source">
+            <div v-for="(s, i) in message.sources" :key="s.chunkId" class="kb-source"
+                 :data-chunk-id="s.chunkId">
               <button class="ks-row" :class="{ open: !!openChunks[s.chunkId] }"
                       @click="toggleChunk(s.chunkId)" :title="openChunks[s.chunkId] ? '收起原文' : '展开原文片段'">
                 <span class="ks-caret">{{ openChunks[s.chunkId] ? '▾' : '▸' }}</span>
@@ -98,10 +103,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
+import { citeIndexFromEvent, decorateCitations, findSourceNode, revealNode } from '@/utils/citations.js'
 const props = defineProps({
   message: { type: Object, required: true },
 })
@@ -122,6 +128,19 @@ function scoreTitle(s) {
 
 // 引用来源默认收起（回答本身才是主角），点标题行展开明细
 const showSources = ref(false)
+
+// 点回答里的 [1] 角标 → 展开引用框 + 展开那条原文 + 滚过去闪一下
+const rootEl = ref(null)
+async function onContentClick(event) {
+  const idx = citeIndexFromEvent(event)
+  if (idx < 0) return
+  const source = (props.message.sources || [])[idx]
+  if (!source) return
+  showSources.value = true
+  openChunks.value = { ...openChunks.value, [source.chunkId]: true }
+  await nextTick()
+  revealNode(findSourceNode(rootEl.value, source.chunkId))
+}
 
 // 每条引用再单独展开：看到命中的原文 chunk 全文（后端 sources[].content）
 // 用 chunkId 做 key，而不是数组下标 —— 重新生成/换范围后下标会错位
@@ -223,11 +242,11 @@ marked.setOptions({
   gfm: true,        // GitHub Flavored Markdown
 })
 
-// 把 Markdown 文本转成 HTML
+// 把 Markdown 文本转成 HTML，并把 [1] 这类引用编号变成可点击角标
 const renderedContent = computed(() => {
   if (!props.message.content) return ''
   try {
-    return marked(props.message.content)
+    return decorateCitations(marked(props.message.content), props.message.sources)
   } catch {
     return props.message.content
   }

@@ -367,15 +367,20 @@ RAG_SYSTEM = """你是 WorkMind AI 知识库助手。
 1. 只根据下方提供的参考文档回答问题，不使用文档之外的知识
 2. 如果文档中没有相关内容，明确说"知识库中未找到相关内容"
 3. 回答要准确、简洁，必要时列出要点
-4. 引用时标注来源，格式：【来源：文档标题 · 第N页】"""
+4. 引用资料时，在句末直接标注方括号编号，例如 [1] 或 [1][3]——
+   编号就是资料列表里的序号，**不要写"【来源：文档标题 · 第N页】"这种长句**"""
 
 
+# 资料编号 = 前端引用角标编号，必须严格一致：
+#   前端把回答里的 [1] 渲染成可点击的蓝色小框，点了就跳到"引用来源"里的第 1 条。
+#   所以这里给模型的编号就是它该引用的编号（以前写"[参考1]"，模型经常改写成
+#   【来源：标题 · 第1页】那句自然语言，前端没法做跳转）。
 def build_context(docs: list[dict]) -> str:
     parts = []
     for i, d in enumerate(docs):
         loc = d.get("pageLabel") or (f"第{d['pageNumber']}页" if d.get("pageNumber") else "无页码")
         parts.append(
-            f"[参考{i + 1}] 《{d['title']}》 {loc} 部门:{d['department']} 版本:{d['version']}\n{d['content']}"
+            f"[{i + 1}] 《{d['title']}》 {loc} 部门:{d['department']} 版本:{d['version']}\n{d['content']}"
         )
     return "\n\n---\n\n".join(parts)
 
