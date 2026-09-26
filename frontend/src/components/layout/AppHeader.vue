@@ -48,6 +48,7 @@ const pageMeta = {
   '/erp':       { title: 'ERP 报销与请假', icon: 'Tickets',      desc: '智能填单，AI 模拟审批流程' },
   '/prompt':    { title: 'Prompt 调试工具', icon: 'EditPen',     desc: 'A/B 测试，版本管理，效果对比' },
   '/monitor':   { title: '用量与成本看板', icon: 'DataAnalysis', desc: 'Token 消耗、费用、缓存命中率' },
+  '/trace':     { title: '全链路追踪',     icon: 'Connection',   desc: '一次请求做了什么：意图 / 检索 / 重排 / 模型 / 工具入参出参' },
 }
 
 const currentMeta = computed(() => {

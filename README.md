@@ -13,6 +13,7 @@
 | ERP 报销请假 | 智能填单 / Multi-Agent 审批 | 🔄 开发中 |
 | Prompt 调试  | A/B测试 / 版本管理 | 🔄 开发中 |
 | 用量看板     | Token消耗 / 费用 / 缓存统计（全模块统一记账，落 PostgreSQL） | ✅ 已完成 |
+| 全链路追踪   | 一次请求内部的完整执行链路：意图 / 向量化 / 检索 / 重排 / 缓存 / 提示词 / 模型 / 工具入参出参 / 异常 | ✅ 已完成 |
 
 ## 技术栈
 
@@ -581,6 +582,7 @@ bash scripts/run-tests.sh tests/test_agent_tools.py    # 只跑 Agent 工具
 | `/api/erp/*` | 自然语言转结构化表单、Multi-Agent 审批流 |
 | `/api/prompt/*` | Prompt 单测(流式)、A/B 测试(流式 `POST /api/prompt/ab-test/stream`)、模板管理 |
 | `/api/monitor/*` | 用量看板：调用统计、Token、成本、缓存命中率（`GET /stats`、`POST /reset`、`PUT /budget`） |
+| `/api/trace/*` | 全链路追踪：`GET /runs`（列表/筛选/搜索）、`GET /runs/{runId}`（完整时间线）、`GET /stats`、`DELETE /runs` |
 
 用量看板的数据来源是 **每一次模型调用写一行 `usage_calls`**（PostgreSQL），
 `GET /api/monitor/stats` 从库里聚合；数据库不可用时降级为进程内统计，
@@ -589,6 +591,30 @@ bash scripts/run-tests.sh tests/test_agent_tools.py    # 只跑 Agent 工具
 Agent（每步模型调用累加）、工作流（整条图的 token）、ERP（填单解析 + 每个审批节点）、Prompt 调试。
 其中 embedding / bge 重排这类**接口不返回 usage** 的调用按字符估算，记录里标 `estimated=true`，
 看板上显示为「估算」，不跟模型返回的真实 token 混为一谈。
+
+### 全链路追踪（`/trace` 页面 / `/api/trace/*`）
+
+用途和开发者盯终端看流程一样，区别是**可回看、可搜索、能对着某一条聊天记录打开**：
+一次请求 = 一行 `trace_runs`，一个步骤 = 一行 `trace_steps`（PostgreSQL，默认保留 7 天）。
+
+记录的步骤：
+`request`（收到提问/任务）→ `intent`（为什么查/不查知识库）→ `embedding`（问句向量化）
+→ `vector_search`（过了权限过滤还剩多少候选、最高分、取回的 TopK）→ `rerank`（打分 / 跳过原因）
+→ `retrieval`（命中几条、为什么没命中）→ `prompt`（组装后的 system prompt）
+→ `cache`（命中 / 未命中）→ `route`（Agent 走哪条分支、为什么）→ `llm`（每次模型调用的耗时与产出）
+→ `tool_call` / `tool_result`（**工具入参与返回**）→ `response` / `error`（异常留档）。
+
+实现（`app/services/trace.py`）：
+- 用 **ContextVar** 传递追踪上下文（和 `current_user` 同一路子），
+  所以调用链深处（意图 / 检索 / 重排 / 工具）直接 `trace_step(...)` 即可，不用改函数签名；
+- 步骤先缓冲在内存，`finish()` 时**一个事务**写 run + 全部 step，不拖慢流式请求；
+- 字符串与单步 detail 都有上限截断，避免一条 trace 把库撑爆；
+- 没有追踪上下文时全部是空操作（脚本 / 测试无感）。
+
+入口：对话里每条 AI 消息、Agent 每张任务卡片的「最终回答」旁都有 🔗**全链路**按钮；
+也支持深链 `/trace?run=<runId>`，方便把某一次执行直接发给别人看。
+
+⚠️ 与 `/api/admin/*` 一样，这是开发/运维接口：**上生产必须加鉴权**。
 
 所有 SSE 流式接口的事件格式均为：
 

@@ -179,6 +179,8 @@ export const useChatStore = defineStore('chat', () => {
         },
         onEvent: (event, data) => {
           if (event === 'cache_hit') aiMsg.fromCache = true
+          // 全链路追踪 id：后端在 start/done 里下发，挂在消息上供"查看全链路"跳转
+          if (data && data.runId) aiMsg.runId = data.runId
           if (event === 'start')     aiMsg.streaming = true
           // 意图判定：这次为什么（不）去查知识库，前端直接展示，便于解释与排障
           if (event === 'intent')    aiMsg.intent = data

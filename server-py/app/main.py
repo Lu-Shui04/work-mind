@@ -18,6 +18,7 @@ from app.routes.health import router as health_router
 from app.routes.knowledge import router as knowledge_router
 from app.routes.monitor import router as monitor_router
 from app.routes.prompt import router as prompt_router
+from app.routes.trace import router as trace_router
 from app.routes.workflow import router as workflow_router
 from app.utils.errors import AppError, app_error_handler
 from app.utils.logger import logger
@@ -92,6 +93,8 @@ app.include_router(workflow_router, prefix="/api/workflow")
 app.include_router(erp_router, prefix="/api/erp")
 app.include_router(prompt_router, prefix="/api/prompt")
 app.include_router(monitor_router, prefix="/api/monitor")
+# 全链路追踪（开发/运维用，与 admin 一样：生产环境应加鉴权或移除）
+app.include_router(trace_router, prefix="/api/trace")
 # 测试/运维用的一键重置（生产环境应加鉴权或移除）
 app.include_router(admin_router, prefix="/api/admin")
 

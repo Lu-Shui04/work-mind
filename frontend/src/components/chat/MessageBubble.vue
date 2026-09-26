@@ -31,6 +31,9 @@
             {{ missSummary }}
           </span>
           <span v-else>未检索知识库（{{ intentReason }}）</span>
+          <!-- 全链路：这一轮从提问到回答，系统都干了什么（意图/检索/重排/模型/工具） -->
+          <router-link v-if="message.runId" class="trace-link" :to="'/trace?run=' + message.runId"
+                       target="_blank" title="看这次请求的完整执行链路">全链路</router-link>
         </div>
 
         <!-- 未命中要能自证原因：库空 / 被权限过滤 / 分数低于阈值，处理方式完全不同 -->
@@ -353,6 +356,7 @@ const renderedContent = computed(() => {
 }
 .kb-intent.hit { color: var(--color-primary-dark); }
 .kb-intent.hit .kb-dot { background: var(--color-success); }
+.kb-intent .trace-link { margin-left: auto; }
 
 /* 未命中原因明细：原文 + 候选数/最高分/阈值，便于判断是入库问题还是阈值问题 */
 .kb-recall {

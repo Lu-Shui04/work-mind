@@ -21,6 +21,7 @@ from app.services.rag.query import (
     MISS_FIRST_RULE, SearchFilters, build_context, miss_notice as miss_notice_text,
     no_knowledge_reply, resolve_knowledge_mode, retrieve_with_meta,
 )
+from app.services.trace import start_trace, trace_step
 from app.utils.logger import logger
 from app.utils.sse import sse_stream
 
@@ -79,6 +80,22 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
     message = body.message
 
     async def generator():
+        # 全链路追踪：从"收到提问"开始记，检索/缓存/模型/异常都挂在同一条 trace 上，
+        # 跑完落库；前端「全链路追踪」页能按这条聊天记录点进来看完整过程。
+        trace = start_trace("chat", question=message, tenant_id=user.tenant_id,
+                            user_id=user_id, user_name=user.name,
+                            meta={"sessionId": session_id, "useKnowledge": body.useKnowledge})
+        trace.step("request", "收到提问", detail={
+            "message": message,
+            "sessionId": session_id,
+            "knowledgeMode": ("强制检索" if body.useKnowledge is True else
+                              "关闭检索" if body.useKnowledge is False else "自动"),
+            "scope": {"department": body.knowledgeDepartment, "docType": body.knowledgeDocType,
+                      "version": body.knowledgeVersion, "includeSuperseded": body.includeSuperseded},
+            "identity": {"userId": user.user_id, "name": user.name,
+                         "departments": user.departments, "clearance": user.clearance},
+            "systemPromptOverride": body.systemPrompt,
+        })
         # 看板上的"平均响应/P99"要包含对话（最常用的入口）。
         # 以前这里写死 latency_ms=0，于是对话永远不出现在延迟统计里。
         started = time.time()
@@ -163,14 +180,23 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 # 部署方仍可用 RAG_ANSWER_POLICY=grounded 让"自动"也走严格模式。
                 if resolve_knowledge_mode(body.useKnowledge, need, sources) == "grounded_miss":
                     text = no_knowledge_reply(recall)
-                    yield "start", {"sessionId": session_id}
+                    yield "start", {"sessionId": session_id, "runId": trace.run_id}
                     for i in range(0, len(text), 3):
                         yield "token", {"token": text[i:i + 3]}
                         await asyncio.sleep(0.006)
                     await append_turn(session_id, message, text, user.tenant_id, user_id)
+                    # 这条路没调模型（只回固定答复），但"为什么没查到"才是要看的东西 ——
+                    # 检索那几步已经在 trace 里了，这里补一条结论
+                    trace_step("response", "知识库未命中（强制模式，不调用模型）", detail={
+                        "reason": (recall or {}).get("reason"),
+                        "reply": text,
+                    })
+                    await trace.finish(summary={"cached": False, "groundedMiss": True,
+                                                "reason": (recall or {}).get("reason")})
                     yield "done", {"fromCache": False, "inputTokens": 0, "outputTokens": 0,
                                    "sourceCount": 0, "grounded": True,
-                                   "reason": (recall or {}).get("reason")}
+                                   "reason": (recall or {}).get("reason"),
+                                   "runId": trace.run_id}
                     logger.info("chat: 知识库未命中，按知识优先策略直接答复", {
                         "reason": (recall or {}).get("reason"), "user": user.user_id,
                         "best": (recall or {}).get("bestScore"),
@@ -209,6 +235,15 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             # ── 4) 缓存（必须带权限隔离域，否则会把 A 权限的答案发给 B）──
             scope = _cache_scope(user, sources)
             cached = cache.get(system_prompt, message, scope)
+            # 组装好的 system prompt 是排查"回答为什么跑偏"的第一手材料，必须留档
+            trace_step("prompt", "组装系统提示词", detail={
+                "systemPrompt": system_prompt,
+                "chars": len(system_prompt),
+                "sourcesInContext": len(sources),
+                "profileInjected": bool(profile_ctx),
+            })
+            if not cached:
+                trace.step("cache", "未命中缓存（需要调用模型）", detail={"scope": scope})
             if cached:
                 logger.info("cache hit", {"sessionId": session_id, "scope": scope[:48]})
                 yield "cache_hit", {}
@@ -228,8 +263,16 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                     latency_ms=round((time.time() - started) * 1000),
                     tenant_id=user.tenant_id, user_id=user_id,
                 )
+                trace.step("cache", "命中缓存（未调用模型）", detail={
+                    "scope": scope, "savedTokens": int(cached.get("tokens") or 0),
+                    "replyChars": len(text),
+                })
+                trace.step("response", "返回缓存回答", detail={"reply": text})
+                await trace.finish(summary={"cached": True, "sources": len(sources),
+                                            "replyChars": len(text)})
                 yield "done", {"fromCache": True, "sourceCount": len(sources),
-                               "savedTokens": int(cached.get("tokens") or 0)}
+                               "savedTokens": int(cached.get("tokens") or 0),
+                               "runId": trace.run_id}
                 return
 
             # 记忆 = 【此前对话摘要】+ 最近 N 轮原文（见 services/chat/memory.py）
@@ -237,7 +280,8 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                         *await memory_messages(session_id, user.tenant_id),
                         HumanMessage(content=message)]
 
-            yield "start", {"sessionId": session_id}
+            # runId 一并下发：前端把它挂在消息上，"查看全链路"按钮直接就能用
+            yield "start", {"sessionId": session_id, "runId": trace.run_id}
 
             full_reply = ""
             input_tokens = 0
@@ -250,6 +294,7 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                     yield "token", {"token": miss_notice[i:i + 3]}
                     await asyncio.sleep(0.004)
 
+            _llm_t0 = time.time()
             async for chunk in chat_model.astream(messages):
                 if chunk.content:
                     full_reply += chunk.content
@@ -257,6 +302,11 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 if getattr(chunk, "usage_metadata", None):
                     input_tokens = chunk.usage_metadata.get("input_tokens", 0)
                     output_tokens = chunk.usage_metadata.get("output_tokens", 0)
+            trace_step("llm", "对话模型生成", duration_ms=round((time.time() - _llm_t0) * 1000),
+                       detail={"model": getattr(chat_model, "model_name", "") or "chat_model",
+                               "inputTokens": input_tokens,
+                               "outputTokens": output_tokens, "replyChars": len(full_reply),
+                               "messages": len(messages), "reply": full_reply})
 
             # 记住这一轮；超过阈值会自动异步压缩更早的对话（不阻塞本次回答）
             await append_turn(session_id, message, full_reply, user.tenant_id, user_id)
@@ -272,9 +322,21 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                             latency_ms=round((time.time() - started) * 1000), from_cache=False,
                             tenant_id=user.tenant_id, user_id=user_id)
 
+            trace_step("response", "返回回答", detail={
+                "reply": full_reply,
+                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                "sources": len(sources),
+                "missNotice": miss_notice or None,
+            })
+            await trace.finish(summary={
+                "cached": False, "sources": len(sources),
+                "inputTokens": input_tokens, "outputTokens": output_tokens,
+                "replyChars": len(full_reply),
+            })
+
             yield "done", {
                 "fromCache": False, "inputTokens": input_tokens, "outputTokens": output_tokens,
-                "sourceCount": len(sources),
+                "sourceCount": len(sources), "runId": trace.run_id,
             }
             logger.info("chat done", {
                 "sessionId": session_id, "inputTokens": input_tokens,
@@ -283,7 +345,16 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             })
         except Exception as err:
             logger.error("chat error", {"error": str(err)})
+            trace.fail("对话处理失败", err)
+            await trace.finish(status="error")
             raise
+        finally:
+            # 客户端中途断开（GeneratorExit）等异常路径：把已经记下的步骤照样落库，
+            # 否则"这次为什么没出结果"就永远查不到了。finish 幂等，已收尾时是空操作。
+            try:
+                await trace.finish(status="cancelled")
+            except Exception:  # noqa: BLE001
+                pass
 
     return sse_stream(generator)
 

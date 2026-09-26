@@ -126,6 +126,9 @@
           <div v-if="task.answer" class="final-answer">
             <div class="answer-header">
               <span>最终回答</span>
+              <!-- 全链路：这次任务每一步（含工具入参出参）的完整记录 -->
+              <router-link v-if="task.runId" class="trace-link" :to="'/trace?run=' + task.runId"
+                           target="_blank" title="看这次任务的完整执行链路（含工具入参出参）">全链路</router-link>
               <button class="btn-copy" @click="copyAnswer(task.answer)">复制</button>
             </div>
             <!-- 回答里的 [1] [2] 是知识库引用编号，渲染成可点击的蓝色角标：

@@ -18,7 +18,9 @@ export const useAgentStore = defineStore('agent', () => {
     { name: 'write_report', label: '生成报告', description: '生成并保存分析报告' },
     { name: 'send_notify',  label: '发送通知', description: '发送通知给相关人员' },
   ])
+  // 与后端 GET /agent/examples 保持一致（接口返回后会用后端的覆盖这里）
   const examples = ref([
+    { title: '养猫多工具测试', icon: '🐱', task: '我很喜欢猫。我家有3只猫，现在生了7个小猫。今天早上朋友问我你家有几只猫我不知道怎么说，后面我送给朋友3只，现在家里有几只也不知道。我不知道猫喜欢吃什么所以想上网查一下，但是我想给我的猫做一个养猫计划报告。' },
     { title: '技术调研', task: '对比 Vue3 和 React 2024年的最新状态，分别查询它们的最新版本和主要特性，生成一份技术选型报告' },
     { title: '费用计算', task: '我出差3天，酒店每晚580元，机票往返1200元，餐费每天150元，帮我计算总报销金额，并查询一下公司差旅报销标准' },
     { title: '工期计算', task: '项目计划从2024年3月1日开始，需要45个工作日完成，帮我计算预计完成日期，并生成一份项目时间轴摘要' },
@@ -80,6 +82,8 @@ export const useAgentStore = defineStore('agent', () => {
       maxStepsReached: false,
       // 意图路由与知识库引用（Agent 已与知识库打通）
       intent:    null,
+      // 全链路追踪 id：后端下发，「查看全链路」按钮拿它跳转
+      runId:     '',
       sources:   [],
       // 召回诊断：没命中时说明原因（库空 / 被权限过滤 / 分数低于阈值）
       recall:    null,
@@ -105,6 +109,8 @@ export const useAgentStore = defineStore('agent', () => {
 
         onEvent: (event, data) => {
           if (event === 'start') {
+            // 全链路追踪 id：后端下发，「查看全链路」按钮拿它跳转
+            if (data && data.runId) task.runId = data.runId
             task.status = 'running'
           }
 

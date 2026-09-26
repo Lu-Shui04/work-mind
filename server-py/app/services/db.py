@@ -203,6 +203,44 @@ CREATE TABLE IF NOT EXISTS usage_calls (
     "CREATE INDEX IF NOT EXISTS idx_usage_calls_ts      ON usage_calls (ts DESC)",
     "CREATE INDEX IF NOT EXISTS idx_usage_calls_feature ON usage_calls (feature, ts DESC)",
 
+    # ── 全链路追踪 ──────────────────────────────────────────────
+    # 目的：一个问题进来之后系统到底干了什么（意图判定 / 检索 / 重排 / 缓存 / 模型 /
+    # 工具入参出参 / 异常），按时间顺序一条条留痕，供事后排查"到底哪一步错了"。
+    # 以前这些只散在容器日志里（docker logs | grep），跑完翻不到、也没法对着
+    # 某一条聊天记录回看 —— 所以独立成两张表：一次请求一行 run，一个步骤一行 step。
+    """
+CREATE TABLE IF NOT EXISTS trace_runs (
+    run_id      TEXT PRIMARY KEY,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    feature     TEXT NOT NULL,
+    question    TEXT NOT NULL DEFAULT '',
+    tenant_id   TEXT NOT NULL DEFAULT '',
+    user_id     TEXT NOT NULL DEFAULT '',
+    user_name   TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'running',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    step_count  INTEGER NOT NULL DEFAULT 0,
+    error       TEXT,
+    summary     JSONB NOT NULL DEFAULT '{}'::jsonb
+)
+""",
+    "CREATE INDEX IF NOT EXISTS idx_trace_runs_ts      ON trace_runs (ts DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trace_runs_feature ON trace_runs (feature, ts DESC)",
+    """
+CREATE TABLE IF NOT EXISTS trace_steps (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      TEXT NOT NULL REFERENCES trace_runs(run_id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'ok',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    detail      JSONB NOT NULL DEFAULT '{}'::jsonb
+)
+""",
+    "CREATE INDEX IF NOT EXISTS idx_trace_steps_run ON trace_steps (run_id, idx)",
+
     # ── 运行期设置（键值）───────────────────────────────────────
     # 目前只存看板的日预算：以前预算也在进程内，重建后悄悄变回 ¥50，
     # 用户改过的预算"保存成功但下次打开又回去了"。

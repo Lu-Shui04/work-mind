@@ -29,6 +29,7 @@ from app.services.model import chat_model, embeddings
 from app.services.rag import rerank
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
+from app.services.trace import trace_step
 from app.utils.logger import logger
 
 # 相似度阈值（绝对下限）：低于此值的切片不纳入参考。
@@ -222,6 +223,31 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
         tenant_id=user.tenant_id, user_id=user.user_id,
         estimated=estimated,
     )
+
+    # 全链路追踪：一次检索的完整结论（命中几条、为什么没命中、引用了哪些切片）。
+    # 对话 / 知识库检索页 / Agent 的 read_doc 都走这里，所以三条链路都能看到。
+    trace_step("retrieval", "知识库检索", duration_ms=round((time.time() - started) * 1000), detail={
+        "question": question,
+        "k": k or DEFAULT_TOP_K,
+        "filters": (filters.describe() if filters else {}),
+        "identity": {"userId": user.user_id, "departments": user.departments,
+                     "clearance": user.clearance},
+        "hits": len(hits),
+        "reason": meta.get("reason"),
+        "explain": meta.get("explain"),
+        "bestScore": meta.get("bestScore"),
+        "threshold": meta.get("threshold"),
+        "candidates": meta.get("candidates"),
+        "totalChunks": meta.get("totalChunks"),
+        "rerank": meta.get("rerank"),
+        "sources": [
+            {"chunkId": h["chunkId"], "title": h["title"], "page": h.get("pageLabel"),
+             "score": h.get("score"), "rerankScore": h.get("rerankScore"),
+             "chars": len(h.get("content") or ""),
+             "preview": (h.get("content") or "")[:160]}
+            for h in hits
+        ],
+    })
     return hits, meta
 
 
@@ -236,7 +262,13 @@ async def _retrieve_with_meta(question: str, user: User, k: int | None = None,
 
     store = get_vector_store()
     total = await store.count(user.tenant_id)          # 当前租户共有多少切片
+    _embed_t0 = time.time()
     query_vec = await embeddings.aembed_query(question)
+    # 命中率低的时候，第一步要能看出"问句向量化"这一步是不是正常
+    trace_step("embedding", "问句向量化", duration_ms=round((time.time() - _embed_t0) * 1000),
+               detail={"chars": len(question), "dim": len(query_vec),
+                       "model": type(getattr(embeddings, "_client", embeddings)).__name__,
+                       "provider": type(embeddings).__name__})
 
     # 过滤条件下推：SQL 先剔除不可见/非生效版本，再算相似度
     p = SqlParams()

@@ -28,8 +28,11 @@ department_hint（年假→hr、报销→finance…）**不参与候选集裁剪
 """
 import os
 import re
+import time
 
 from pydantic import BaseModel, Field
+
+from app.services.trace import trace_step
 
 # recall_first（默认，召回优先） / strict（旧的"规则+模型"判定）
 RAG_INTENT_MODE = (os.getenv("RAG_INTENT_MODE", "recall_first") or "recall_first").lower()
@@ -141,6 +144,25 @@ def _strict_classify(message: str) -> IntentDecision:
 
 
 async def classify_intent(message: str) -> IntentDecision:
+    """对外唯一入口：判定"这次要不要查知识库"，并记一步追踪。
+
+    "为什么这次没查知识库"是最常被问的问题，所以判定结果、依据、改写后的
+    检索词都要落到 trace 里（前端全链路页一眼能看到）。
+    """
+    started = time.time()
+    decision = await _classify_intent(message)
+    trace_step("intent", "意图判定", duration_ms=round((time.time() - started) * 1000), detail={
+        "needKnowledge": decision.need_knowledge,
+        "decisionSource": decision.decision_source,
+        "reason": decision.reason,
+        "searchQuery": decision.query,
+        "departmentHint": decision.department_hint,
+        "ruleHit": decision.rule_hit,
+    })
+    return decision
+
+
+async def _classify_intent(message: str) -> IntentDecision:
     if RAG_INTENT_MODE == "strict":
         decision = _strict_classify(message)
         if decision.decision_source != "uncertain":

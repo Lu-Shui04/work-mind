@@ -14,6 +14,7 @@
 # - 分类结果随 SSE 下发，用户能看到"这次为什么去查文档/为什么调工具"（可解释）
 import json
 import os
+import time
 from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -30,6 +31,7 @@ from app.services.db import StorageUnavailable
 from app.services.identity import User, get_current_user, reset_current_user, set_current_user
 from app.services.model import create_chat_model
 from app.services.rag.intent import classify_intent
+from app.services.trace import trace_step
 from app.services.rag.query import (
     MISS_FIRST_RULE, SearchFilters, build_context, miss_notice as miss_notice_text,
     no_knowledge_reply, retrieve_with_meta,
@@ -423,6 +425,9 @@ async def run_agent(task: str, on_event, user: User | None = None,
 
     streamed = False
     sanitizer = _StreamSanitizer()
+    model_step_seq = 1    # 第几次模型调用（只用于追踪里的编号）
+    _llm_t0 = time.time()
+    _llm_chars = 0
     step_count = 0        # 工具调用次数（前端步骤卡片数）
     model_steps = 0       # 模型调用次数 —— MAX_STEPS 限制的是这个，别和上面混
     max_steps_hit = False
@@ -505,6 +510,13 @@ async def run_agent(task: str, on_event, user: User | None = None,
             # 没命中就走别的分支，别让预检索结果影响后面的节点
             pre_sources, pre_recall = [], {}
 
+        # 查了库但没查到（且不是"强制"分支，强制分支会直接回固定答复）：
+        # 把开场白带进图，保证最终回答第一句就是"知识库中没有查到相关内容"。
+        # ⚠️ 必须在下面 trace_step / intent 事件之前算出来 —— 之前把它放在后面，
+        #    结果 tracer 里引用它直接 UnboundLocalError，整个 Agent 任务当场挂掉。
+        kb_missed = bool(need) and not pre_sources and not forced_miss
+        miss_text = miss_notice_text() if kb_missed else ""
+
         await on_event("intent", {
             "route": route,
             "routeLabel": _ROUTE_LABELS.get(route, route),
@@ -515,11 +527,14 @@ async def run_agent(task: str, on_event, user: User | None = None,
             "departmentHint": intent.department_hint,
             "ruleHit": intent.rule_hit,
         })
-
-        # 查了库但没查到（且不是"强制"分支，强制分支会直接回固定答复）：
-        # 把开场白带进图，保证最终回答第一句就是"知识库中没有查到相关内容"
-        kb_missed = bool(need) and not pre_sources and not forced_miss
-        miss_text = miss_notice_text() if kb_missed else ""
+        # 全链路追踪：这次任务被路由到了哪条路、为什么（"为什么没查知识库"最常见的答案就在这）
+        trace_step("route", "任务路由：" + _ROUTE_LABELS.get(route, route), detail={
+            "route": route, "reason": route_reason, "searchQuery": search_query,
+            "needKnowledge": need, "decisionSource": source,
+            "departmentHint": intent.department_hint, "ruleHit": intent.rule_hit,
+            "prefetchHits": len(pre_sources), "prefetchRecall": pre_recall,
+            "kbMissed": kb_missed,
+        })
 
         # 【库里没有 → 回答必须先说明】route=chat（直接回答）时，由后端把这句话作为
         # **第一个 token** 发出去：模型再怎么发挥，用户看到的第一句也是它。
@@ -562,6 +577,10 @@ async def run_agent(task: str, on_event, user: User | None = None,
 
             if event_type == "on_tool_start":
                 step_count += 1
+                # 工具入参：排查"参数为什么传错了"就靠这一条
+                trace_step("tool_call", "调用工具：" + _get_tool_label(name), detail={
+                    "step": step_count, "toolName": name, "args": data.get("input"),
+                })
                 await on_event("tool_call", {
                     "step": step_count, "toolName": name,
                     "args": data.get("input"), "label": _get_tool_label(name),
@@ -575,6 +594,10 @@ async def run_agent(task: str, on_event, user: User | None = None,
                         result = json.loads(result)
                     except (json.JSONDecodeError, TypeError):
                         pass
+                # 工具出参：和入参成对出现，直接能看出"工具返回了什么、模型据此说了什么"
+                trace_step("tool_result", "工具返回：" + _get_tool_label(name), detail={
+                    "toolName": name, "result": result,
+                })
                 await on_event("tool_result", {
                     "toolName": name, "result": result,
                     "resultText": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
@@ -583,6 +606,8 @@ async def run_agent(task: str, on_event, user: User | None = None,
             # 每次模型调用开始时换一个干净的过滤器（一次调用内命中标记后就不再输出）
             if event_type == "on_chat_model_start":
                 sanitizer = _StreamSanitizer()
+                _llm_t0 = time.time()
+                _llm_chars = 0
 
             if event_type == "on_chat_model_stream":
                 chunk = data.get("chunk")
@@ -593,6 +618,7 @@ async def run_agent(task: str, on_event, user: User | None = None,
                     piece = sanitizer.feed(content)
                     if piece:
                         final_content += piece
+                        _llm_chars += len(piece)
                         await on_event("token", {"token": piece})
                 # 用量统计：把每一步模型调用的 token 累加起来，看板才有真实成本
                 usage = getattr(chunk, "usage_metadata", None) if chunk else None
@@ -605,7 +631,13 @@ async def run_agent(task: str, on_event, user: User | None = None,
                 tail = sanitizer.flush()
                 if tail:
                     final_content += tail
+                    _llm_chars += len(tail)
                     await on_event("token", {"token": tail})
+                # 全链路追踪：Agent 的第 N 次模型调用（含它产出了多少字）
+                trace_step("llm", f"模型调用 #{model_step_seq}", status="ok",
+                           duration_ms=round((time.time() - _llm_t0) * 1000),
+                           detail={"chars": _llm_chars, "streamedTail": bool(tail)})
+                model_step_seq += 1
 
             # 模型这一步产出了 tool_calls：说明它刚刚流式吐出来的那些字只是"过程说明"
             # （"我先查一下…"），不是最终回答。发一个 answer_reset 让前端把它挪到过程说明区。
@@ -646,6 +678,11 @@ async def run_agent(task: str, on_event, user: User | None = None,
         # 超过阈值会自动异步压缩更早的对话（append_turn 内部处理，不阻塞本次回答）
         await append_turn(session_id, task, final_content, _user.tenant_id, _user.user_id)
 
+        trace_step("response", "任务完成", detail={
+            "route": route, "toolCalls": step_count, "modelSteps": model_steps,
+            "maxStepsReached": max_steps_hit, "inputTokens": input_tokens,
+            "outputTokens": output_tokens, "answer": final_content,
+        })
         await on_event("done", {"steps": step_count, "modelSteps": model_steps, "route": route,
                                 "contentLength": len(final_content),
                                 "maxStepsReached": max_steps_hit,
@@ -655,6 +692,9 @@ async def run_agent(task: str, on_event, user: User | None = None,
                                     "route": route, "maxStepsReached": max_steps_hit})
     except Exception as err:
         logger.error("agent: error", {"error": str(err)})
+        trace_step("error", "Agent 执行出错", status="error",
+                   detail={"error": f"{type(err).__name__}: {err}", "route": route,
+                           "toolCalls": step_count})
         message = str(err)
         # 把基础设施类的英文报错翻译成用户能看懂、能行动的话
         if "Recursion limit" in message:

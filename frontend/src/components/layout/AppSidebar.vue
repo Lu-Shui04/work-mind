@@ -80,6 +80,7 @@ const navItems = [
   { path: '/erp',       icon: 'Tickets',        label: '报销请假',  badge: 'ERP' },
   { path: '/prompt',    icon: 'EditPen',        label: 'Prompt 调试' },
   { path: '/monitor',   icon: 'DataAnalysis',   label: '用量看板' },
+  { path: '/trace',     icon: 'Connection',     label: '全链路追踪' },
 ]
 
 function toggleTheme() {

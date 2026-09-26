@@ -26,6 +26,7 @@ from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
 from app.services.model import create_chat_model
+from app.services.trace import trace_step
 from app.utils.logger import logger
 from app.utils.tokens import estimate_tokens_many, sum_usage
 
@@ -151,6 +152,11 @@ async def rerank(query: str, docs: list[str], usage_out: dict | None = None) -> 
     只有 bge 那种专用 rerank 接口不回 usage、才退化成按字符估算。
     """
     if not is_enabled() or len(docs) < 2:
+        # "这次为什么没重排"也是排查时要看的信息，别让它静默消失
+        trace_step("rerank", "重排跳过", detail={
+            "enabled": is_enabled(), "provider": PROVIDER, "candidates": len(docs),
+            "reason": "未启用重排" if not is_enabled() else "候选少于 2 条，排序没有意义",
+        })
         return None
     docs = docs[:MAX_CANDIDATES]
     started = time.time()
@@ -187,10 +193,18 @@ async def rerank(query: str, docs: list[str], usage_out: dict | None = None) -> 
         logger.info("rag: rerank done", {"provider": PROVIDER, "model": model_name,
                                          "docs": len(docs),
                                          "top": round(max(scores), 2) if scores else None})
+        trace_step("rerank", "重排打分", duration_ms=round((time.time() - started) * 1000), detail={
+            "provider": PROVIDER, "model": model_name, "minScore": MIN_SCORE,
+            "candidates": len(docs), "top": round(max(scores), 3) if scores else None,
+            "scores": [round(s, 3) for s in scores],
+        })
         return scores
     except Exception as err:
         # 失败也可能已经产生费用（例如打分回包解析失败），有 handler 就照实记
         _fill_usage(True)
         logger.warn("rag: rerank failed, keep vector order",
                     {"provider": PROVIDER, "error": str(err)[:160]})
+        trace_step("rerank", "重排失败（保留向量序）", status="error",
+                   duration_ms=round((time.time() - started) * 1000),
+                   detail={"provider": PROVIDER, "error": str(err)[:300]})
         return None

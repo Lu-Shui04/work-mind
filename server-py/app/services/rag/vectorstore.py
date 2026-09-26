@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from app.schemas.document import ChunkRecord
 from app.services.db import require_pool
+from app.services.trace import trace_step
 from app.utils.logger import logger
 
 _INSERT_COLUMNS = ("chunk_id", "doc_id", "tenant_id", "order_index", "department", "version",
@@ -104,6 +105,20 @@ class PgVectorStore:
             "candidates": int(diag["candidates"] or 0),
             "bestScore": round(float(diag["best"]), 4) if diag["best"] is not None else None,
         }
+        # 全链路追踪：把"过了过滤还剩多少条、最高分多少、取回的 TopK 是谁"记下来。
+        # 排查"明明库里有却答不出来"时，就是靠这几个数区分
+        # "候选被过滤没了" / "分数不够" / "取回来的不是那一条"。
+        trace_step("vector_search", "向量检索（pgvector）", detail={
+            "where": where_sql,
+            "k": k,
+            "candidates": meta["candidates"],
+            "bestScore": meta["bestScore"],
+            "topHits": [
+                {"chunkId": c.chunk_id, "score": round(s, 4), "docId": c.doc_id,
+                 "chars": len(c.text or ""), "preview": (c.text or "")[:120]}
+                for c, s in results
+            ],
+        })
         logger.info("rag: vector search", {"candidates": meta["candidates"],
                                            "best": meta["bestScore"], "k": k})
         return results, meta

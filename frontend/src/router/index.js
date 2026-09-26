@@ -49,6 +49,13 @@ const routes = [
     component: () => import('@/views/MonitorView.vue'),
     meta: { title: '用量看板', icon: '📊' },
   },
+  {
+    // 全链路追踪：某一轮请求内部到底走了哪些步骤（含工具入参出参）
+    path: '/trace',
+    name: 'Trace',
+    component: () => import('@/views/TraceView.vue'),
+    meta: { title: '全链路追踪', icon: '🔗' },
+  },
 ]
 
 const router = createRouter({
