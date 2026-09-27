@@ -74,11 +74,42 @@ def chat_model_name() -> str:
     return getattr(chat_model, "model_name", "") or "deepseek-chat"
 
 
-def _cache_scope(user: User, sources: list[dict]) -> str:
-    """缓存隔离域：不同租户/部门/密级，以及命中的不同切片集合，不能互相复用答案。"""
+# 缓存键的口径版本：改了 key 的组成就把它 +1，避免新旧条目互相串味
+_CACHE_SCOPE_VERSION = "v2"
+
+# 像"追问"的消息不进缓存（也不查缓存）。
+# 为什么必须挡这一类：缓存键是「问题 + 权限域 + 画像」，**不含会话历史** ——
+# "公司的年假是怎么规定的？"独立成句，复用答案没问题；
+# 但"那差旅呢？"的答案强依赖上一句，一旦跨会话复用就会答非所问。
+# 挡掉的代价很小（追问本来就是少数），换来的是"不会答错"。
+_FOLLOWUP_PREFIXES = ("那", "这", "它", "他", "她", "还有", "再", "继续", "接着", "然后",
+                      "另外", "刚才", "上面", "上述", "此", "其", "同样", "一样")
+
+
+def _is_followup(message: str) -> bool:
+    """看起来像"依赖上文"的追问 → 每次都走完整流程（带正确上下文），不进缓存。"""
+    text = (message or "").strip()
+    if len(text) < 6:                       # 太短的问题通常要靠上下文才成立
+        return True
+    return text.startswith(_FOLLOWUP_PREFIXES)
+
+
+def _cache_scope(user: User) -> str:
+    """缓存隔离域：租户 + 部门 + 密级（**权限域**，不同域绝不复用答案）。
+
+    为什么不再把"命中的切片 id"算进来（v1 的做法）：
+    算它就必须**先检索才能算 key** —— 于是每次"命中"仍然要花 1~2 秒做
+    意图判定 + 问句向量化 + 向量检索 + 重排，缓存几乎白做。
+    实测：命中一次 2695ms，其中检索占 794ms、重放占 1900ms，模型生成是 0。
+    现在改成"权限域 + 有效 system prompt（含画像）+ 问题"作 key：
+    **请求一进来就能查缓存，命中直接返回**（不再走意图判定与检索）。
+
+    代价（说清楚，不藏着）：知识库更新后，最长一个 TTL（默认 30 分钟）内可能返回旧答案。
+    这是任何缓存都有的取舍；权限隔离不受影响 —— 域不同根本不会命中同一个 key。
+    想更"新鲜"就把 CACHE_TTL 调小。
+    """
     deps = ",".join(sorted(user.departments))
-    chunks = ",".join(sorted(s["chunkId"] for s in sources))
-    return f"{user.tenant_id}|{deps}|{user.clearance}|{chunks}"
+    return f"{_CACHE_SCOPE_VERSION}|{user.tenant_id}|{deps}|{user.clearance}"
 
 
 @router.post("/stream", dependencies=[Depends(rate_limiter)])
@@ -116,6 +147,54 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             base_system = ASSISTANT_SYSTEM
             profile = await get_profile(user_id, user.tenant_id)
             profile_ctx = profile_to_context(profile)
+
+            # ── 0) 早查缓存：命中就**直接返回**，不再走意图判定与知识库检索 ──
+            # 缓存键 = 权限域（租户/部门/密级）+ 有效 system prompt（含画像）+ 问题。
+            # 关键：它**不含检索结果**，所以不必先检索就能查 —— 这是"命中直接返回"的前提。
+            # （老做法把"命中的切片 id"算进 key，必须先检索才能查缓存，等于每次命中
+            #   仍然白花 1~2 秒做向量化+检索+重排；实测命中一次 2695ms。）
+            cache_prompt = (body.systemPrompt or base_system) + profile_ctx
+            scope = _cache_scope(user)
+            cacheable = not _is_followup(message)
+            _lookup_t0 = time.time()
+            cached = await cache.get(cache_prompt, message, scope) if cacheable else None
+            if not cacheable:
+                trace.step("cache", "跳过缓存（像追问，答案依赖上文）", detail={"message": message})
+            if cached:
+                text = cached["content"]
+                saved = int(cached.get("tokens") or 0)
+                trace.step("cache", "命中缓存（未检索、未调用模型）", detail={
+                    "scope": scope, "savedTokens": saved, "replyChars": len(text),
+                    "lookupMs": round((time.time() - _lookup_t0) * 1000),
+                })
+                logger.info("cache hit", {"sessionId": session_id, "scope": scope[:48],
+                                          "lookupMs": round((time.time() - _lookup_t0) * 1000)})
+                yield "cache_hit", {}
+                # 大块快速重放：以前每 3 个字 sleep 6ms，一篇 600 字的回答要 1.2 秒 ——
+                # 命中本该是"秒回"，却被假打字机拖得跟真调用差不多。
+                for i in range(0, len(text), 24):
+                    yield "token", {"token": text[i:i + 24]}
+                    await asyncio.sleep(0.002)
+                # 缓存命中的回答同样要进记忆，否则下一轮会"忘记"这次说过什么
+                await append_turn(session_id, message, text, user.tenant_id, user_id)
+                # 缓存命中也必须记账：这是看板"缓存命中率"的唯一数据来源
+                from app.routes.monitor import record_api_call
+                record_api_call(
+                    feature="chat", from_cache=True, saved_tokens=saved,
+                    latency_ms=round((time.time() - started) * 1000),
+                    tenant_id=user.tenant_id, user_id=user_id,
+                )
+                trace.step("response", "返回缓存回答", detail={"reply": text,
+                                                               "elapsedMs": round((time.time() - started) * 1000)})
+                await trace.finish(summary={"cached": True, "replyChars": len(text),
+                                            "savedTokens": saved})
+                yield "done", {"fromCache": True, "sourceCount": 0, "savedTokens": saved,
+                               "runId": trace.run_id}
+                return
+
+            trace.step("cache", "未命中缓存（继续走意图判定与检索）", detail={
+                "scope": scope, "lookupMs": round((time.time() - _lookup_t0) * 1000),
+            })
 
             # ── 1) 意图判断：这次要不要查知识库 ──────────────────────
             # 默认"召回优先"：只有明显与知识库无关的消息（打招呼/闲聊/纯算式）才不查，
@@ -245,48 +324,15 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 )
             system_prompt = (body.systemPrompt or base_system) + profile_ctx + context_block
 
-            # ── 4) 缓存（必须带权限隔离域，否则会把 A 权限的答案发给 B）──
-            scope = _cache_scope(user, sources)
-            cached = await cache.get(system_prompt, message, scope)
             # 组装好的 system prompt 是排查"回答为什么跑偏"的第一手材料，必须留档
+            # （注意：它是**检索之后**的完整 prompt；缓存键用的是检索之前的 cache_prompt，
+            #  见上面"早查缓存"那一段 —— 两者不要混用）
             trace_step("prompt", "组装系统提示词", detail={
                 "systemPrompt": system_prompt,
                 "chars": len(system_prompt),
                 "sourcesInContext": len(sources),
                 "profileInjected": bool(profile_ctx),
             })
-            if not cached:
-                trace.step("cache", "未命中缓存（需要调用模型）", detail={"scope": scope})
-            if cached:
-                logger.info("cache hit", {"sessionId": session_id, "scope": scope[:48]})
-                yield "cache_hit", {}
-                text = cached["content"]
-                for i in range(0, len(text), 3):
-                    yield "token", {"token": text[i:i + 3]}
-                    await asyncio.sleep(0.006)
-                # 缓存命中的回答同样要进记忆，否则下一轮会"忘记"这次说过什么
-                await append_turn(session_id, message, text, user.tenant_id, user_id)
-                # 缓存命中也必须记账：这是看板"缓存命中率"的唯一数据来源。
-                # 以前这条分支直接 return，没调 record_api_call ——
-                # 于是不管命中多少次的对话，看板上永远是 0% 命中率、¥0 省下的钱。
-                from app.routes.monitor import record_api_call
-                record_api_call(
-                    feature="chat", from_cache=True,
-                    saved_tokens=int(cached.get("tokens") or 0),
-                    latency_ms=round((time.time() - started) * 1000),
-                    tenant_id=user.tenant_id, user_id=user_id,
-                )
-                trace.step("cache", "命中缓存（未调用模型）", detail={
-                    "scope": scope, "savedTokens": int(cached.get("tokens") or 0),
-                    "replyChars": len(text),
-                })
-                trace.step("response", "返回缓存回答", detail={"reply": text})
-                await trace.finish(summary={"cached": True, "sources": len(sources),
-                                            "replyChars": len(text)})
-                yield "done", {"fromCache": True, "sourceCount": len(sources),
-                               "savedTokens": int(cached.get("tokens") or 0),
-                               "runId": trace.run_id}
-                return
 
             # 记忆 = 【此前对话摘要】+ 最近 N 轮原文（见 services/chat/memory.py）
             messages = [SystemMessage(content=system_prompt),
@@ -330,7 +376,12 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             # 记住这一轮；超过阈值会自动异步压缩更早的对话（不阻塞本次回答）
             await append_turn(session_id, message, full_reply, user.tenant_id, user_id)
 
-            await cache.set(system_prompt, message, full_reply, input_tokens + output_tokens, scope)
+            # 用**检索之前**的 cache_prompt 作键（与上面早查用的是同一个），
+            # 这样下一次同样的提问一进来就能命中，不必再做检索。
+            # 追问类消息不写缓存：它的答案依赖上文，复用会答非所问。
+            if cacheable:
+                await cache.set(cache_prompt, message, full_reply,
+                                input_tokens + output_tokens, scope)
 
             asyncio.create_task(
                 _safe_extract_profile(user_id, message, full_reply, user.tenant_id))
