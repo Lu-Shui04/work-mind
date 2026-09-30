@@ -21,17 +21,16 @@ C. **未命中必须能自证原因**：返回 kb_empty / all_filtered / below_t
 import os
 import time
 
-from langchain_core.prompts import ChatPromptTemplate
-
-from app.schemas.document import DocumentRecord
-from app.services.identity import SqlParams, User, can_view, doc_visibility_sql, version_visible
-from app.services import pricing
-from app.services.model import chat_model, embeddings, embeddings_tier_name
+from app.models.schemas import DocumentRecord
+from app.core.identity import SqlParams, User, can_view, doc_visibility_sql, version_visible
+from app.models import pricing
+from app.models.llm import embeddings, embeddings_tier_name
 from app.services.rag import rerank
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
-from app.services.trace import trace_step
-from app.utils.logger import logger
+from app.infra.trace import trace_step
+from app.core.logger import logger
+from app.prompts.chat import KB_GROUNDING_RULES, MISS_LEAD, MISS_FIRST_RULE, miss_notice, miss_reply  # noqa: F401
 
 # 相似度阈值（绝对下限）：低于此值的切片不纳入参考。
 # 必须随 embedding 模型重新标定（不同模型的相似度分布不同），所以走环境变量。
@@ -42,110 +41,24 @@ SIMILARITY_MARGIN = float(os.getenv("RAG_SIMILARITY_MARGIN", "0"))
 # 返回条数：4 条对"制度问答"偏少，容易刚好漏掉答案所在的那片
 DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
 
-# 检索不到内容、且用户没强制只用知识库时怎么回答（**只影响"自动"模式**）：
-#   fallback（默认）—— 先明确说明"知识库未命中"，然后**照常用通用知识回答**。
-#                      用户要的是"别拿一句没找到把人堵死"，所以这是默认行为；
-#   grounded（严格）—— 明确说"知识库中未找到相关内容"，**不调用模型**，
-#                      不拿模型自身知识去顶，避免与公司资料口径不一致。
-#
-# ⚠️ 用户在前端选「强制检索」时不看这个开关：强制就是只依据知识库，查不到就说查不到。
-#    选「关闭」则压根不检索，直接回答（不会出现任何"未找到"话术）。
-ANSWER_POLICY = (os.getenv("RAG_ANSWER_POLICY", "fallback") or "fallback").lower()
 
-
-def resolve_knowledge_mode(use_knowledge: bool | None, need: bool,
-                           sources: list, policy: str | None = None) -> str:
+def resolve_knowledge_mode(use_knowledge: bool | None, need: bool, sources: list) -> str:
     """知识库三态语义的**唯一裁决处**：这次该怎么作答。
 
-    返回值：
+    只有三种结果：
       no_retrieval    —— 用户选了「关闭」：压根没查库，直接用通用知识回答
                          （不会出现任何"未找到"话术）
       grounded_answer —— 查到资料：只依据资料回答，并标注引用
-      grounded_miss   —— 「强制」或部署方显式要求严格：只回"未找到"，不许用通用知识补充
-      fallback_miss   —— 「自动」且库里没有：先说明未命中，再用通用知识回答
+      miss            —— 查了但没命中：回 miss_reply()，**不调用模型**
 
-    为什么单独抽出来：这三条规则原来散在路由的 if 里，容易出现
+    为什么单独抽出来：这些规则原来散在路由的 if 里，容易出现
     "用户选了关闭却还回一句知识库未找到"这种自相矛盾的行为。集中一处才好测。
     """
     if not need:
         return "no_retrieval"
     if sources:
         return "grounded_answer"
-    if use_knowledge is True:
-        return "grounded_miss"
-    if (policy or ANSWER_POLICY).lower() == "grounded":
-        return "grounded_miss"
-    return "fallback_miss"
-
-
-# ── "库里没有，必须先说明" ────────────────────────────────────────────
-# 用户明确要求：知识库没有的内容，回答**第一句必须先说明这一点**，
-# 不能一上来就给通用知识答案 —— 否则读的人会把通用知识当成公司口径。
-# 两道保险：
-#   1) miss_notice()  由后端拼在模型输出**之前**（结构上保证一定在最前面）
-#   2) MISS_FIRST_RULE 写进系统提示词，要求模型自己第一句也说明（读起来才自然）
-MISS_LEAD = "知识库中没有查到相关内容"
-
-
-def miss_notice() -> str:
-    """拼在回答最前面的说明（后端发出，不依赖模型是否听话）。"""
-    return f"（{MISS_LEAD}，以下内容来自通用知识，不代表公司口径。）\n\n"
-
-
-MISS_FIRST_RULE = (
-    "【硬性要求】**回答的第一句必须明确说明：企业知识库中没有查到与本问题相关的内容**"
-    f"（例如先说「{MISS_LEAD}」），说完之后才能给出通用知识回答。"
-    "严禁跳过这句说明直接作答，也不要把通用常识写成公司规定、编造制度、数字或出处。"
-)
-
-
-def no_knowledge_reply(recall: dict | None = None) -> str:
-    """知识优先策略下的固定答复：把"没找到"说清楚，并给出可执行的下一步。"""
-    r = recall or {}
-    reason = r.get("reason")
-    lines = ["知识库中未找到相关内容。"]
-
-    # 用户自己收窄了检索范围时，先把这个原因说清楚 ——
-    # 否则"没找到"会被误读成"库里没有"，而实际是自己把范围选窄了
-    flt = r.get("appliedFilters") or {}
-    explicit = []
-    if flt.get("department"):
-        explicit.append("归属部门=" + flt["department"])
-    if flt.get("docType"):
-        explicit.append("文档类型=" + flt["docType"])
-    if flt.get("version"):
-        explicit.append("版本=" + flt["version"])
-
-    if explicit:
-        lines.append("检索情况：当前检索范围被限制在「" + "、".join(explicit) + "」，"
-                     "这个范围内没有匹配到内容。把上方的「检索范围」切回「全部可见」再试一次。")
-    elif reason == "below_threshold":
-        best, cutoff = r.get("bestScore"), r.get("threshold")
-        lines.append(f"检索情况：有 {r.get('candidates', 0)} 条候选片段，但最高相似度 "
-                     f"{best} 低于阈值 {cutoff}，没有足够的依据作答。")
-    elif reason == "rerank_rejected":
-        rk = r.get("rerank") or {}
-        lines.append(f"检索情况：召回了 {r.get('candidates', 0)} 条候选片段，它们"
-                     f"主题上沾边、但都回答不了这个具体问题（重排最高相关性 "
-                     f"{rk.get('topScore')}，低于下限 {rk.get('minScore')}），已全部丢弃，"
-                     "所以不作为依据。")
-    elif reason == "all_filtered":
-        lines.append("检索情况：知识库里确实有内容，但都被权限或版本条件过滤掉了"
-                     "（可在右上角切换身份验证，或检查文档的归属部门 / 密级 / 生效日期）。")
-    elif reason == "kb_empty":
-        lines.append("检索情况：知识库当前没有任何切片 —— 文档可能还没入库，"
-                     "或换库之后没有重新入库。")
-    elif reason in ("storage_unavailable", "embedding_unavailable", "unavailable"):
-        lines.append(f"检索情况：知识库暂时不可用 —— {r.get('explain') or '请稍后重试'}。")
-    elif r.get("explain"):
-        lines.append(f"检索情况：{r['explain']}。")
-
-    lines.append("可以试试：\n"
-                 "· 换个更具体的说法再问一次（尽量用文档里出现过的词）\n"
-                 "· 到「知识库」页确认这份资料已入库、并且已生效\n"
-                 "· 如果这个问题本来就不需要公司资料，把输入框下方的「知识库」切到「关闭」，"
-                 "我就直接用通用知识回答")
-    return "\n\n".join(lines)
+    return "miss"
 
 
 class SearchFilters:
@@ -209,8 +122,8 @@ async def retrieve_with_meta(question: str, user: User, k: int | None = None,
     hits, meta = await _retrieve_with_meta(question, user, k=k, filters=filters,
                                            rerank_usage=rerank_usage)
 
-    from app.routes.monitor import record_api_call
-    from app.utils.tokens import estimate_tokens
+    from app.api.monitor import record_api_call
+    from app.infra.tokens import estimate_tokens
 
     # query 向量化：embedding 接口不回 usage，按字符估算（estimated=True）
     query_tokens = estimate_tokens(question)
@@ -412,31 +325,6 @@ async def _retrieve_with_meta(question: str, user: User, k: int | None = None,
     return hits, meta
 
 
-async def retrieve(question: str, user: User, k: int = 4,
-                   filters: SearchFilters | None = None) -> list[dict]:
-    """返回命中切片（含引用定位信息），已按权限与版本过滤。"""
-    docs, _ = await retrieve_with_meta(question, user, k=k, filters=filters)
-    return docs
-
-
-# 兼容旧调用（Agent 的 read_doc 工具用）
-async def retrieve_docs(question: str, category: str | None = None, k: int = 4,
-                        user: User | None = None) -> list[dict]:
-    user = user or User()
-    filters = SearchFilters(department=category) if category else None
-    return await retrieve(question, user, k=k, filters=filters)
-
-
-RAG_SYSTEM = """你是 WorkMind AI 知识库助手。
-
-规则：
-1. 只根据下方提供的参考文档回答问题，不使用文档之外的知识
-2. 如果文档中没有相关内容，明确说"知识库中未找到相关内容"
-3. 回答要准确、简洁，必要时列出要点
-4. 引用资料时，在句末直接标注方括号编号，例如 [1] 或 [1][3]——
-   编号就是资料列表里的序号，**不要写"【来源：文档标题 · 第N页】"这种长句**"""
-
-
 # 资料编号 = 前端引用角标编号，必须严格一致：
 #   前端把回答里的 [1] 渲染成可点击的蓝色小框，点了就跳到"引用来源"里的第 1 条。
 #   所以这里给模型的编号就是它该引用的编号（以前写"[参考1]"，模型经常改写成
@@ -451,17 +339,17 @@ def build_context(docs: list[dict]) -> str:
     return "\n\n---\n\n".join(parts)
 
 
-def build_prompt():
-    return ChatPromptTemplate.from_messages([
-        ("system", RAG_SYSTEM),
-        ("human", "参考文档：\n{context}\n\n问题：{question}"),
-    ])
+def build_turn_context(sources: list[dict]) -> str:
+    """本轮依据块：命中就放资料 + 引用规则。
+
+    返回空串 = 本轮没有资料（没命中 / 关闭检索）：此时不发这个块 ——
+    没命中走的是固定答复 miss_reply()，压根不调用模型，不需要给模型写什么规则。
+    调用方必须把它放到**会话历史之后、用户提问之前**（见 api/chat.py 的
+    build_turn_messages —— 位置错了"命中却说没查到"那个 bug 就会静默复发）。
+    """
+    if not sources:
+        return ""
+    return KB_GROUNDING_RULES + "\n" + build_context(sources)
 
 
-async def rag_answer_stream(question: str, docs: list[dict]):
-    """给定检索结果，流式生成带引用的回答。"""
-    context = build_context(docs)
-    chain = build_prompt() | chat_model
-    async for chunk in chain.astream({"context": context, "question": question}):
-        if chunk.content:
-            yield chunk.content
+

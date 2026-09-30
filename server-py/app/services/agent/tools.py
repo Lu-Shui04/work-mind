@@ -21,11 +21,11 @@ import httpx
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app.services.resilience import (
+from app.infra.resilience import (
     TOOL_MAX_RETRIES, TOOL_TIMEOUT, BreakerOpenError, RetryExhaustedError,
     call_with_resilience,
 )
-from app.utils.logger import logger
+from app.core.logger import logger
 
 # ── 时区 ────────────────────────────────────────────────────────
 # 容器默认跑在 UTC："今天是几号"在 UTC 与北京时间之间会差一天
@@ -253,7 +253,7 @@ async def read_doc_tool(question: str) -> str:
 
     try:
         # 关键：必须用"当前调用者"的身份检索，否则会绕过权限把别的部门文档喂给模型
-        from app.services.identity import get_current_user
+        from app.core.identity import get_current_user
         from app.services.rag.query import SearchFilters, retrieve_with_meta
 
         user = get_current_user()
@@ -553,7 +553,7 @@ def _tool_event(kind: str, detail: dict) -> None:
     """把工具的韧性事件写进日志 + 全链路追踪（没有追踪上下文时是空操作）。"""
     logger.warn("tool resilience: " + kind, detail)
     try:
-        from app.services.trace import trace_step
+        from app.infra.trace import trace_step
         trace_step("resilience", f"工具韧性：{kind}",
                    status="error" if kind in ("gave_up", "breaker_open") else "ok",
                    detail=detail)

@@ -17,7 +17,7 @@ function normalize(s) {
 }
 
 /** 按标题（优先）或页码，在引用列表里找到对应的一条；找不到返回 -1 */
-export function findSourceIndex(sources, { title = '', page = null } = {}) {
+function findSourceIndex(sources, { title = '', page = null } = {}) {
   if (!Array.isArray(sources) || !sources.length) return -1
   const t = normalize(title)
   if (t) {

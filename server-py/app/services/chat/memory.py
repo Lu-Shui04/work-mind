@@ -17,9 +17,12 @@ import re
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from app.services.db import get_pool
-from app.services.model import chat_model
-from app.utils.logger import logger
+from app.core.db import get_pool
+from app.models.llm import chat_model
+from app.core.logger import logger
+from app.prompts.memory import (
+    PROFILE_CONTEXT_HEADER, SUMMARY_MESSAGE_HEADER, SUMMARY_SYSTEM, profile_extract_system,
+)
 
 # 超过多少轮开始压缩（一轮 = 一问一答）
 SUMMARY_AFTER_ROUNDS = int(os.getenv("MEMORY_SUMMARY_AFTER_ROUNDS", "10"))
@@ -57,11 +60,6 @@ def _note_degraded(reason: str) -> None:
         return
     _degraded_notice_sent = True
     logger.warn("memory: 数据库不可用，会话记忆退回进程内存（重启会丢）", {"reason": reason[:160]})
-
-
-def using_database() -> bool:
-    """当前记忆是否落在数据库上（看板/自检用）。"""
-    return get_pool() is not None
 
 
 # ── 会话：读写 ──────────────────────────────────────────────────
@@ -142,10 +140,7 @@ async def memory_messages(session_id: str, tenant_id: str | None = None,
     out: list = []
     summary = await get_summary(session_id, tenant_id)
     if summary:
-        out.append(SystemMessage(content=(
-            "【此前对话的摘要】（更早的对话已经压缩成下面这段，请把它当作已经发生过的事实）\n"
-            + summary
-        )))
+        out.append(SystemMessage(content=SUMMARY_MESSAGE_HEADER + "\n" + summary))
     for item in recent:
         content = item.get("content", "")
         if item.get("role") == "user":
@@ -179,15 +174,6 @@ class _Summary(BaseModel):
     summary: str = Field(description="合并后的对话摘要，不超过 400 字")
 
 
-_SUMMARY_SYSTEM = """你在维护一段多轮对话的长期记忆：把「已有摘要」和「新增对话」合并成一份新摘要。
-
-要求：
-1. 保留：用户身份与偏好、已经确认的事实与结论、未完成的事项、关键数字与专有名词
-2. 丢弃：寒暄客套、重复内容、已经被推翻的说法
-3. 用第三人称陈述（"用户…"、"助手…"），条目化，不超过 400 字
-4. 只输出摘要正文，不要任何解释或前后缀"""
-
-
 async def summarize_session(session_id: str, tenant_id: str | None = None) -> str | None:
     """把"除最近 N 轮之外"的对话压缩进摘要。失败不影响对话，静默返回 None。"""
     tenant = tenant_id or DEFAULT_TENANT
@@ -211,7 +197,7 @@ async def summarize_session(session_id: str, tenant_id: str | None = None) -> st
         previous = (await get_summary(session_id, tenant)) or "（还没有摘要）"
         result: _Summary = await chat_model.with_structured_output(
             _Summary, method="function_calling").ainvoke([
-                {"role": "system", "content": _SUMMARY_SYSTEM},
+                {"role": "system", "content": SUMMARY_SYSTEM},
                 {"role": "user", "content": f"已有摘要：\n{previous}\n\n新增对话：\n{transcript}"},
             ])
         summary = (result.summary or "").strip()
@@ -426,7 +412,11 @@ def profile_to_context(profile: dict) -> str:
     if not parts:
         return ""
     bullet = "\n".join(f"- {p}" for p in parts)
-    return f"\n\n用户背景：\n{bullet}"
+    # 画像只是**背景**，不是本轮要回答的议题。
+    # 不加这句话时真实翻过车（2026-09-27）：用户问「知识库里有哪些内容？」，画像里写着
+    # "当前目标：申请年假"，模型就在结尾补了一句"知识库中未找到与年假相关的内容" ——
+    # 用户没问年假，而且库里明明有这份制度。
+    return "\n\n" + PROFILE_CONTEXT_HEADER + "\n" + bullet
 
 
 class _ProfileExtraction(BaseModel):
@@ -448,14 +438,7 @@ async def extract_and_update_profile(user_id: str, user_msg: str, ai_reply: str,
         extract_model = chat_model.with_structured_output(_ProfileExtraction, method="function_calling")
 
         result: _ProfileExtraction = await extract_model.ainvoke([
-            {
-                "role": "system",
-                "content": (
-                    "从对话中提取用户信息，只填写有明确依据的字段。\n"
-                    f"当前已知画像：{current}\n"
-                    "如果没有新信息，hasInfo 返回 false。"
-                ),
-            },
+            {"role": "system", "content": profile_extract_system(current)},
             {"role": "user", "content": f"用户说：{user_msg}\nAI回复：{ai_reply[:200]}"},
         ])
 

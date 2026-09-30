@@ -8,10 +8,10 @@
 |------|------|------|
 | 智能对话助手 | 多轮对话 / 流式输出 / 用户画像 | ✅ 已完成 |
 | 知识库问答   | 文档上传 / RAG 检索 / 来源标注 / 未命中原因诊断 | ✅ 已完成 |
-| 任务 Agent   | Function Call / ReAct / 工具可视化 | 🔄 开发中 |
-| 内容工作流   | 周报/纪要/邮件/PRD 工作流 | 🔄 开发中 |
-| ERP 报销请假 | 智能填单 / Multi-Agent 审批 | 🔄 开发中 |
-| Prompt 调试  | A/B测试 / 版本管理 | 🔄 开发中 |
+| 任务 Agent   | LangGraph 路由 + ReAct 工具循环（6 个工具）/ 工具调用可视化 / 步数用尽强制收尾 | ✅ 已完成 |
+| 内容工作流   | 周报 / 会议纪要 / 邮件润色 / PRD 四个工作流，支持人工审核处暂停与恢复 | ✅ 已完成 |
+| ERP 报销请假 | 自然语言智能填单（结构化输出）+ Multi-Agent 审批链，材料不足时中断等人工补充 | ✅ 已完成 |
+| Prompt 调试  | 模板管理 / 版本回顾 / A/B 测试（三次模型调用打分，费用计入看板） | ✅ 已完成 |
 | 用量看板     | Token消耗 / 费用 / 缓存统计（全模块统一记账，落 PostgreSQL） | ✅ 已完成 |
 | 全链路追踪   | 一次请求内部的完整执行链路：意图 / 向量化 / 检索 / 重排 / 缓存 / 提示词 / 模型 / 工具入参出参 / 异常 | ✅ 已完成 |
 
@@ -45,14 +45,17 @@ workmind/
 │   │   └── styles/           全局样式
 │   └── vite.config.js
 │
-├── server-py/                Python 后端
+├── server-py/                Python 后端（**按层分目录**，一层一件事）
 │   ├── app/
-│   │   ├── main.py           入口：中间件、路由注册
-│   │   ├── config.py         环境变量统一读取
-│   │   ├── middleware.py     限流、日志、prompt 注入检测
-│   │   ├── routes/           health / chat / knowledge / agent / workflow / erp / prompt / monitor
-│   │   ├── services/         业务逻辑（db / model / cache / rag / agent / erp / prompt / workflow）
-│   │   └── utils/            日志、错误处理、SSE 封装
+│   │   ├── main.py           应用装配：中间件、异常处理、路由注册
+│   │   ├── api/              HTTP 层：路由与出入参（chat / knowledge / agent / workflow / erp / prompt / monitor / trace / admin / health）
+│   │   ├── core/             基础设施：config 配置 · db 连接与建表 · identity 身份与权限 · logger 日志 · errors 异常 · middleware 限流与注入检测 · sse 流式封装
+│   │   ├── models/           模型层：llm 模型构造与降级 · pricing 单价与计费 · schemas Pydantic 数据结构
+│   │   ├── prompts/          **提示词层**：chat / rag / agent / memory / erp / workflow / lab —— 所有喂给模型的文字都在这里
+│   │   ├── infra/            旁路设施：cache 两级缓存 · trace 全链路追踪 · resilience 超时/重试/熔断 · tokens 估算
+│   │   └── services/         业务层：rag 检索问答 · chat 会话记忆 · agent 任务与工具 · erp 审批 · workflow 工作流
+│   ├── tests/                回归测试（黄金用例，见文末）
+│   ├── evals/                评测集（真实模型跑，见 evals/README.md）
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── uploads/              知识库文档上传目录（运行时生成）
@@ -187,7 +190,7 @@ curl http://localhost:3000/health/live
 
 > 知识库已从"进程内存"迁到 **PostgreSQL + pgvector**（compose 里的 `db` 服务），
 > 文档与切片持久化，**容器重建/重启都不会丢索引**。
-> 表结构由后端启动时幂等创建（`app/services/db.py`），不需要手工执行建表脚本。
+> 表结构由后端启动时幂等创建（`app/core/db.py`），不需要手工执行建表脚本。
 > 用客户端连库看看：`psql postgresql://workmind:workmind@localhost:5433/workmind`
 
 ## 四、知识库存储与检索（PostgreSQL + pgvector）
@@ -254,12 +257,10 @@ Agent 会**先真的检索一次**，再决定路由：
 
 | 模式 | 查到资料 | 库里没有 |
 |------|---------|---------|
-| **自动**（默认） | 只依据资料回答，标注引用【来源：…】 | 先说明「知识库未命中：<原因>」，**然后照常用通用知识回答** |
-| **强制** | 同上 | 只回「知识库中未找到相关内容」，**不许**用模型自己的知识补充 |
+| **自动**（默认） | 只依据资料回答，带方括号编号引用 | 回一句固定引导（见下），**不调用模型** |
+| **强制** | 同上 | 同上（自动与强制在"没命中"上行为一致） |
 | **关闭** | ——（压根不检索） | 直接回答，不会出现任何「未找到」话术 |
 
-> 部署方想让「自动」也走严格模式：`RAG_ANSWER_POLICY=grounded`（默认 `fallback`）。
-> 这个开关**只影响自动模式**，强制模式永远只依据知识库。
 > 前端的三态选择会存 localStorage —— 以前是纯内存状态，刷新后静默回到「自动」，
 > 用户以为还是「关闭」，下一句就又被知识库拦了。
 
@@ -307,17 +308,73 @@ bash scripts/check-memory-persistence.sh
 Agent 侧：任务按 `sessionId` 归属（前端持久化在 localStorage，点「清空」会换新会话并清掉后端记忆），
 所以第二个任务可以直接说"刚才那次出差，酒店改成 700 一晚"。
 
-### 检索不到时答不答：`RAG_ANSWER_POLICY`
+### 检索不到时怎么答：一句固定引导，不调用模型
 
-| 取值 | 行为 |
-|------|------|
-| `fallback`（默认） | 自动模式下查不到 → 先说明未命中，再用通用知识回答 |
-| `grounded` | 自动模式下查不到 → **不调用模型**，只回"知识库中未找到相关内容" + 检索情况 + 下一步怎么办 |
+`rag/query.py::miss_reply()` 是**唯一**的"没查到"答复（对话与 Agent 的知识分支共用）：
 
-配套的两条规则：
-1. 命中资料时，system 里写死"这些资料是本轮回答的**唯一依据**"，资料不足的部分明确说没找到，
+```
+知识库中没有查到相关内容。
+
+你想问什么，可以直接问我 —— 说得具体一点更容易查到，比如「年假有多少天」「出差住宿标准是多少」。
+```
+
+为什么是这样（2026-09-27 按要求简化，之前有两套：`fallback` = 先说明没查到、再用通用知识长篇回答；
+`grounded` = 回一长段"检索情况 + 可以试试"的工程文案，现均已取消）：
+
+1. **不调用模型**：没有依据就不让它发挥 —— 省一次调用，也不会再把通用常识写成公司规定；
+2. **不堆检索诊断**：候选数/阈值/重排分这些前端在回答下方本来就有提示框（黄色的"未命中原因"），
+   写进正文只会让用户看不懂；
+3. **也不能只说一句"没查到"就把人堵死**：所以补一句"你想问什么可以直接问我"并给两个例子；
+4. 用户在前端选「关闭知识库」时压根不检索，不会出现这段文案。
+
+配套的规则：
+1. 命中资料时，本轮资料块里写死"这些资料是本轮回答的**唯一依据**"，资料不足的部分明确说没找到，
    **不许补充、推测、举一反三**（以前只写了"不要编造"，模型还是会顺着自身知识往下讲）；
-2. 强制模式下没命中时，答复里会告诉用户可以切「自动」或「关闭」拿到通用知识回答。
+   这块内容的位置有讲究，见下一节「本轮资料排在会话历史之后」；
+2. 只回答用户**本轮问的那个问题**，不对没问的话题（包括用户画像里写的目标）下"库里没有"的结论；
+   也不许把"本轮命中几条"说成"库里只有几篇"（这两条都是 2026-09-27 实测踩出来的）。
+
+### 本轮资料必须排在**会话历史之后**（否则"命中却说没查到"）
+
+`routes/chat.py::build_turn_messages` 定死了本轮的消息顺序，**别再改**：
+
+```
+SystemMessage(人设 + 画像)
+  → 会话历史（摘要 + 最近 N 轮原文）
+  → SystemMessage(【本轮依据块】：命中 = 资料 + 引用规则；未命中 = MISS_FIRST_RULE)
+  → HumanMessage(用户这轮的问题)
+```
+
+2026-09-27 实测到的真实事故：同一会话里先问「没有年假等？」（那次重排把 12 条候选全判成
+"回答不了这个问题"，未命中，助手答了"知识库中没有查到相关内容，以下是通用知识…"），紧接着问
+「我想请年假」——**检索命中了 2 条《年假与休假政策》切片（重排 0.84 / 0.33，都过了下限）**，
+模型却回答"知识库中没有查到年假制度的相关内容"，一条条款都没用上。
+
+原因不是检索、也不是提示词没写，而是顺序：资料原先拼在 **system prompt 顶部**，
+而上一轮那句"没查到"作为**最近一条助手消息**排在它后面，模型把最近的消息当成了本轮结论。
+把依据块挪到历史之后、提问之前，并在块里显式声明"历史里说过的没查到是上一轮的结论、
+对本轮无效"之后，同一场景恢复正常（照常给出司龄三档和 3 个工作日申请流程，带 [1][2] 引用）。
+
+回归防线：
+
+```
+bash scripts/run-tests.sh tests/test_turn_context.py   # 钉住消息顺序与依据块文案（不联网）
+bash scripts/run-evals.sh --suite answer_grounding     # ag-014 用 prelude 复现多轮污染场景
+```
+
+### "知识库里有哪些内容"这类问题：照常检索，但不许把命中条数说成库的大小
+
+"库里有哪些内容 / 有哪些关于 X 的资料"照常走**向量检索**（跟其它问题一样），
+但本轮依据块里写死了一条：**不允许根据"本轮命中了 N 条"下结论说"库里只有 N 篇/只有这些"**。
+
+原因是 2026-09-27 实测：问「知识库里有哪些内容？」时检索只命中 1 条，模型回
+"本轮检索到的资料只有 1 篇"，用户读成**"库里只有 1 篇"**（同一身份可见 6 篇）。
+库里到底有多少，属于「知识库」页该回答的事（那里有完整的文档列表与筛选）；
+对话这条链路只对"本轮检索到的这几段"负责，说不清就请用户把问题问具体。
+
+（同一次排查还发现：这类问句向量检索能召回《年假与休假政策》，但重排按"能不能直接回答
+这个查询"把候选全判成答不了 → 回一句"没查到"。这是重排判据的固有边界，属于换个说法再问
+就能解决的范畴，不再为它加特例。）
 
 ### 角色预设 → 检索范围预设
 
@@ -345,7 +402,8 @@ Agent 侧：任务按 `sessionId` 归属（前端持久化在 localStorage，点
 并提示切回「全部可见」，而不是笼统地说"被权限过滤掉了"。
 
 > `role` 字段与 `GET /api/chat/roles` 仍然保留（老客户端不报错），但已废弃、不再改变行为。
-> 想自定义人设请用 `systemPrompt` 字段（后端已支持，前端暂未暴露输入框）。
+> 想自定义人设用 `systemPrompt` 字段（后端支持；对话页没有这个输入框，
+> 要试不同人设用「Prompt 调试」页，那里可以随时改 system prompt 并做 A/B 对比）。
 
 ### 召回不到内容时，先看是哪一类原因
 
@@ -404,18 +462,45 @@ Agent 侧：任务按 `sessionId` 归属（前端持久化在 localStorage，点
 > 意图模型猜出来的 `department_hint` 只做提示、**不参与候选集裁剪**
 > —— 猜错一次（把 general 文档猜成 tech）会让整份文档召不回的代价太大。
 
-### 本地不用 Docker 跑后端
+### 本地不用 Docker 跑（应用在本机、数据库用容器里的那个）
 
-单独起一个 PostgreSQL（`pgvector/pgvector:pg17` 镜像或本机安装 + `CREATE EXTENSION vector`），
-然后在 `.env` 里配任一形式：
+最省事的组合：`db` + `redis` 继续用容器（数据卷还在、知识库不用重新灌），
+**后端和前端在本机直接跑** —— 改代码即时生效，不用每次 `--build`：
 
+```bash
+# 1) 先把容器里的 server / frontend 停掉，腾出 3000 与 5173（db/redis 留着）
+docker compose stop server frontend
+
+# 2) 后端：本机 venv + 依赖（uv 比 pip 快很多）
+cd server-py
+uv venv .venv --python 3.11
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+
+# 3) 起后端（环境变量只在这一条命令里给，不动 .env）
+#    DATABASE_URL 指向容器发布的 5433；REDIS_URL 指向 6380
+#    PYTHONUTF8 必须有：Windows 控制台默认 GBK，config.validate_config() 里的 "✓" 会直接抛 UnicodeEncodeError
+$env:PYTHONUTF8="1"; $env:PYTHONIOENCODING="utf-8"
+$env:DATABASE_URL="postgresql://workmind:<PG_PASSWORD>@127.0.0.1:5433/workmind"
+$env:REDIS_URL="redis://127.0.0.1:6380/0"
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 3000
+
+# 4) 前端：Vite 开发服务器（/api 会代理到 localhost:3000，见 vite.config.js）
+cd ../frontend
+npm install          # 本机没有 pnpm 时用 npm 即可
+npm run dev -- --host 0.0.0.0    # 不加 --host 时只监听 ::1，用 127.0.0.1 访问会连不上
 ```
-DATABASE_URL=postgresql://workmind:workmind@localhost:5433/workmind
-# 或 PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE
-```
 
-连不上时后端**仍会启动**，但知识库接口统一返回 503 并说明原因（`STORAGE_UNAVAILABLE`），
-`GET /health` 的 `status` 会变成 `degraded` —— 不会静默降级成"检索无结果"。
+跑完打开 http://localhost:5173。想切回容器：`docker compose start server frontend`（再停掉本机两个进程）。
+
+> 本地模式下跑评测要**在宿主机**执行（runner 只用标准库，不需要装依赖）：
+> `py -3.11 server-py/evals/run_evals.py --base-url http://127.0.0.1:3000`。
+> 不要在 WSL 里跑 `scripts/run-evals.sh` —— WSL 的 127.0.0.1 不是宿主机的 127.0.0.1，
+> 预检会直接报"后端不可用"。
+
+> 单独起一个 PostgreSQL 也行（`pgvector/pgvector:pg17` 镜像或本机安装 + `CREATE EXTENSION vector`），
+> 在 `.env` 里配 `DATABASE_URL`（或 `PGHOST / PGPORT / PGUSER / PGPASSWORD / PGDATABASE`）。
+> 连不上时后端**仍会启动**，但知识库接口统一返回 503 并说明原因（`STORAGE_UNAVAILABLE`），
+> `GET /health` 的 `status` 会变成 `degraded` —— 不会静默降级成"检索无结果"。
 
 ### 灌入公司制度文档（示例任务依赖）
 
@@ -516,6 +601,16 @@ bash scripts/check-web-search.sh    # 自检：现在真搜还是演示数据，
 智谱搜索档位用 `ZHIPU_SEARCH_ENGINE` 切换：`search_std`（标准版，便宜，默认）/ `search_pro`（高级版，更准也更贵）。
 搜索结果带发布时间，会一起喂给模型，回答里能标出「这条信息是哪天的」。
 
+> **当前部署用的是博查**：`.env` 里 `SEARCH_PROVIDER=bocha` + `BOCHA_API_KEY=...`。
+> 自检输出示例（`bash scripts/check-web-search.sh`）：
+> ```
+> 当前搜索后端： bocha
+>   BOCHA_API_KEY : 已配置
+> 实测查询：今天有什么科技新闻
+> [1] …（真实结果）
+> 结论：联网搜索可用 ✅
+> ```
+
 ### Agent 循环的四个保护（都是踩过坑才加的）
 
 1. **步数用尽会强制收尾**：模型正打算调工具时如果直接结束循环，用户拿到的「最终回答」
@@ -571,19 +666,27 @@ bash scripts/run-evals.sh                              # 跑评测集（见 serv
 脚本把 `server-py` 挂进镜像里跑，改完代码不用重新构建；`docker exec workmind-server python /app/tests/xxx.py`
 也可以（镜像里已经带了 `tests/`）。
 
-| 测试文件 | 覆盖什么 | 要不要联网 |
-|---------|---------|-----------|
-| `tests/test_resilience.py` | 韧性状态机：退避与抖动、可重试判定、超时、熔断开/半开/合、取消不算失败、指标 | 否 |
-| `tests/test_fallback.py` | **故障注入**：把主模型指向必死地址，验证真的降级到智谱、流式降级、跳闸后不再等超时 | 是（打真实上游） |
-| `tests/test_memory.py` / `test_agent_tools.py` / `test_parser_cross_page.py` | 会话记忆、Agent 工具、PDF 跨页解析 | 否 |
+**只留黄金用例**：单测 45 条 + 评测 35 条 = 80 条（2026-09 精简过一次，从 101 + 71 砍到现在的规模）。
+标准是"每条都能讲清防的是什么坑"——覆盖核心路径与真实踩过的边界，零碎的同质用例一律删掉。
 
-评测集（`server-py/evals/`）：RAG 检索、意图判定、回答依据、Agent 工具、ERP 解析共 5 个集，
+| 测试文件 | 覆盖什么（黄金用例） | 用例数 | 联网 |
+|---------|-------------------|-------|------|
+| `tests/test_agent_tools.py` | 计算工具的错答案边界（带单位/注入/幂运算/除零/浮点精度）、日期与时区、read_doc 引用、流式标记过滤、重复调用防护、工具契约 | 15 | 否 |
+| `tests/test_memory.py` | 会话记忆落库与租户隔离、摘要窗口与失败保留原文、知识库三态、答案缓存的权限域隔离 | 10 | 否 |
+| `tests/test_turn_context.py` | **本轮资料必须排在会话历史之后**（"命中却说没查到"那个 bug 的守门人）、依据块内容 | 5 | 否 |
+| `tests/test_resilience.py` | 退避与抖动、可重试判定、超时、熔断开与半开恢复 | 6 | 否 |
+| `tests/test_parser_cross_page.py` | PDF 跨页句子接回、表格续表去重、切片页码区间与重叠 | 5 | 否 |
+| `tests/test_agent_graph.py` | LangGraph **状态字段契约**（静默丢字段只能靠用例守）与预检索失败路径 | 3 | 否 |
+| `tests/test_fallback.py` | **故障注入**：主模型指向必死地址，验证真的降级到备用模型 | 1 | 是 |
+
+评测集（`server-py/evals/`，共 35 条）：RAG 检索 10 · 回答依据 8 · 意图判定 6 · Agent 任务 6 · ERP 解析 5，
 逐条判定并输出通过率 / 平均与 P95 耗时 / 失败明细（JSON + Markdown 报告）。
+每条用例都带一个 `guard` 字段写明"这条在防什么回归"，报告里直接可读。
 
 
 ## 七、工程化：韧性、缓存与可观测
 
-### 1. 韧性四件套（`server-py/app/services/resilience.py`）
+### 1. 韧性四件套（`server-py/app/infra/resilience.py`）
 
 | 能力 | 做什么 | 为什么必须有 |
 |------|--------|-------------|
@@ -605,14 +708,14 @@ curl http://localhost:3000/health/resilience
 #   config: {...} }
 ```
 
-### 2. 两级答案缓存（`app/services/cache.py`）
+### 2. 两级答案缓存（`app/infra/cache.py`）
 
 - **L1 进程内**：最热的问答走这里，不跨进程、不序列化；
 - **L2 Redis**：跨实例共享 + **重启不丢**（TTL 由 Redis 自己过期）；
 - **Redis 不可用自动降级为纯 L1**：缓存是加速手段，不能因为它挂了让业务不可用；
   降级状态在 `health.cache.backend`（`redis+l1` / `memory-only`）里如实标注。
 
-### 2. 两级答案缓存（`app/services/cache.py`）
+### 2. 两级答案缓存（`app/infra/cache.py`）
 
 - **L1 进程内**：最热的问答走这里，不跨进程、不序列化；
 - **L2 Redis**：跨实例共享 + **重启不丢**（TTL 由 Redis 自己过期）；
@@ -624,8 +727,8 @@ curl http://localhost:3000/health/resilience
 
 #### 命中要「直接返回」：缓存键里不能有检索结果
 
-缓存键 = **权限域（租户/部门/密级）+ 有效 system prompt（含画像）+ 问题**，
-**不含检索命中的切片 id** —— 这一点决定了命中能不能「秒回」：
+缓存键 = **权限域（租户/部门/密级）+ 检索域（知识库三态 + 部门/类型/版本/是否含历史版本）
++ 有效 system prompt（含画像）+ 问题**，**不含检索命中的切片 id** —— 这一点决定了命中能不能「秒回」：
 
 | 做法 | 键里有没有切片 id | 命中时还要做什么 | 实测命中耗时 |
 |------|------------------|-----------------|-------------|
@@ -636,6 +739,15 @@ curl http://localhost:3000/health/resilience
 **模型生成是 0** —— 也就是「命中」只省了模型，其余照跑，缓存几乎白做。
 现在命中链路只剩三步（`request → cache 2ms → response`），
 并且重放从「每 3 字 sleep 6ms」改成「每 24 字 sleep 2ms」。
+
+**检索域为什么也在键里**（v3 补的）：知识库三态（自动/强制/关闭）与检索范围
+（部门/文档类型/版本/是否含历史版本）**都会改变答案本身**，但它们既不在 system prompt 里
+（检索上下文是检索之后才拼进去的），也不在权限域里。少了它会出现两种张冠李戴：
+
+- 选「本部门 = 财务」提问 → 这个范围内确实没有 → 未命中的回答被缓存；切回「全部可见」重问，
+  拿回来的还是「知识库中未找到相关内容」，而库里其实有内容；
+- 选「关闭知识库」拿到通用知识回答 → 改成「强制检索」重问，命中同一个键，
+  「只依据知识库作答、查不到就说查不到」被静默绕过。
 
 **代价说清楚**：键不含检索结果 ⇒ 知识库更新后，最长一个 TTL（默认 30 分钟）内可能返回旧答案。
 想更「新鲜」就把 `CACHE_TTL` 调小；权限隔离不受影响（域不同根本不会命中同一个键）。
@@ -680,7 +792,7 @@ curl http://localhost:3000/health/resilience
 
 #### `.github/workflows/evals.yml`（手动触发 + 每晚 02:00）
 
-起整栈 → 灌公司制度文档（按 sha256 幂等，不重复计费）→ 跑 5 个评测集 69 条 →
+起整栈 → 灌公司制度文档（按 sha256 幂等，不重复计费）→ 跑 5 个评测集 35 条 →
 把报告写进 Job Summary 并作为 artifact 上传。需要仓库 Secrets 里配 `DEEPSEEK_API_KEY` / `ZHIPU_API_KEY`。
 
 本地等价命令：
@@ -715,7 +827,7 @@ Agent（每步模型调用累加）、工作流（整条图的 token）、ERP（
 其中 embedding / bge 重排这类**接口不返回 usage** 的调用按字符估算，记录里标 `estimated=true`，
 看板上显示为「估算」，不跟模型返回的真实 token 混为一谈。
 
-#### 计费单价（`server-py/app/services/pricing.py`）
+#### 计费单价（`server-py/app/models/pricing.py`）
 
 单价不写死在代码注释里，而是照官方价目表逐项实现，并且**按模型 × 缓存命中 × 峰谷时段**实算：
 
@@ -755,7 +867,7 @@ Agent（每步模型调用累加）、工作流（整条图的 token）、ERP（
 → `tool_call` / `tool_result`（**工具入参与返回**）→ `node`（工作流节点进出）
 → `response` / `error`（异常留档）。
 
-实现（`app/services/trace.py`）：
+实现（`app/infra/trace.py`）：
 - 用 **ContextVar** 传递追踪上下文（和 `current_user` 同一路子），
   所以调用链深处（意图 / 检索 / 重排 / 工具）直接 `trace_step(...)` 即可，不用改函数签名；
 - 步骤先缓冲在内存，`finish()` 时**一个事务**写 run + 全部 step，不拖慢流式请求；

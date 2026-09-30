@@ -73,11 +73,8 @@ services:
       # 的查询只有 0.42~0.45，写 0.5 会导致整片召不回
       - RAG_SIMILARITY_THRESHOLD=${RAG_SIMILARITY_THRESHOLD:-0.35}
       - RAG_TOP_K=${RAG_TOP_K:-6}
-      # 检索不到内容时：grounded=明确说没找到（不拿模型自身知识兜底）/ fallback=照常回答
-      # 自动模式下"库里没有"怎么办：fallback=先说明未命中、再用通用知识回答（默认）；
-      # grounded=只回"没找到"（想在"自动"下也严格就改成 grounded）
-      # 注意：「强制」不看这个开关，永远是只依据知识库作答
-      - RAG_ANSWER_POLICY=${RAG_ANSWER_POLICY:-fallback}
+      # 检索不到内容时怎么答：统一回一句固定引导（query.py::miss_reply），不调用模型、
+      # 也不用通用知识兜底 —— 不再需要开关（原来那个 RAG_ANSWER_POLICY 已撤掉）
       # 会话记忆：超过 N 轮异步做摘要，每次带「摘要 + 最近 K 轮」
       - MEMORY_SUMMARY_AFTER_ROUNDS=${MEMORY_SUMMARY_AFTER_ROUNDS:-10}
       - MEMORY_KEEP_ROUNDS=${MEMORY_KEEP_ROUNDS:-10}

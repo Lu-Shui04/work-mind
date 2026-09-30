@@ -7,21 +7,21 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.config import config, validate_config
-from app.middleware import RequestLoggerMiddleware
-from app.services.db import StorageUnavailable, close_db, init_db
-from app.routes.admin import router as admin_router
-from app.routes.agent import router as agent_router
-from app.routes.chat import router as chat_router
-from app.routes.erp import router as erp_router
-from app.routes.health import router as health_router
-from app.routes.knowledge import router as knowledge_router
-from app.routes.monitor import router as monitor_router
-from app.routes.prompt import router as prompt_router
-from app.routes.trace import router as trace_router
-from app.routes.workflow import router as workflow_router
-from app.utils.errors import AppError, app_error_handler
-from app.utils.logger import logger
+from app.core.config import config, validate_config
+from app.core.middleware import RequestLoggerMiddleware
+from app.core.db import StorageUnavailable, close_db, init_db
+from app.api.admin import router as admin_router
+from app.api.agent import router as agent_router
+from app.api.chat import router as chat_router
+from app.api.erp import router as erp_router
+from app.api.health import router as health_router
+from app.api.knowledge import router as knowledge_router
+from app.api.monitor import router as monitor_router
+from app.api.prompt import router as prompt_router
+from app.api.trace import router as trace_router
+from app.api.workflow import router as workflow_router
+from app.core.errors import AppError, app_error_handler
+from app.core.logger import logger
 
 # 启动前校验配置
 validate_config()
@@ -111,12 +111,12 @@ async def on_startup():
     # 但知识库接口会明确报"数据库未连接"，不会静默返回空结果。
     await init_db()
     # 日预算存在 app_settings 里，启动时读回来（否则重建容器后悄悄变回默认值）
-    from app.routes.monitor import load_budget
+    from app.api.monitor import load_budget
     await load_budget()
     # 缓存：**主动探一次 Redis**，把"用的是 redis+l1 还是降级成 memory-only"在启动日志里说清楚。
     # 缓存挂了不该阻止启动，但必须让人一眼看到（而不是等用户抱怨命中率掉了才发现）。
-    from app.services.cache import cache
-    from app.services.resilience import health_snapshot
+    from app.infra.cache import cache
+    from app.infra.resilience import health_snapshot
     await cache._get_redis()          # noqa: SLF001 - 启动自检，故意提前触发连接
     snapshot = health_snapshot()
     logger.info("resilience: ready", {
@@ -134,6 +134,6 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    from app.services.cache import cache
+    from app.infra.cache import cache
     await cache.close()      # 关掉 Redis 连接，别让连接池悬着
     await close_db()

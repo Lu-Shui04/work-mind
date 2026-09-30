@@ -1,6 +1,8 @@
 # server-py/tests/test_fallback.py
 """故障注入测试：主模型不可用时，真的会降级到备用模型吗？
 
+（本文件只保留**黄金用例**：核心路径 + 真实踩过的边界，每条都能讲清「防的是什么坑」；零碎用例已精简。）
+
 运行方式（容器内，需要网络与 ZHIPU_API_KEY）：
     docker exec workmind-server python /app/tests/test_fallback.py
 
@@ -25,9 +27,9 @@ sys.path.insert(0, os.environ.get("APP_DIR", "/app"))
 
 from langchain_openai import ChatOpenAI  # noqa: E402
 
-from app.config import config  # noqa: E402
-from app.services import model as M  # noqa: E402
-from app.services import resilience as R  # noqa: E402
+from app.core.config import config  # noqa: E402
+from app.models import llm as M  # noqa: E402
+from app.infra import resilience as R  # noqa: E402
 
 
 def _broken_primary(temperature=0):

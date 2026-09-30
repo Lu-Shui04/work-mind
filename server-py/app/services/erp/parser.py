@@ -7,9 +7,10 @@ from typing import Literal
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
-from app.services import pricing
-from app.services.model import create_chat_model, primary_model_name
-from app.utils.tokens import sum_usage
+from app.models import pricing
+from app.models.llm import create_chat_model, primary_model_name
+from app.infra.tokens import sum_usage
+from app.prompts.erp import expense_parse_system, leave_parse_system
 
 _model = create_chat_model(temperature=0)
 
@@ -20,8 +21,8 @@ def _record_parse_usage(handler: UsageMetadataCallbackHandler, started: float) -
     以前 erp 的 /parse 记的是 input_tokens=0/output_tokens=0 —— 调用次数对、
     费用永远是 ¥0，看板上的"ERP 审批"因此完全没有参考价值。
     """
-    from app.routes.monitor import record_api_call
-    from app.services.trace import trace_step
+    from app.api.monitor import record_api_call
+    from app.infra.trace import trace_step
 
     input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
     latency_ms = round((time.time() - started) * 1000)
@@ -63,14 +64,7 @@ async def parse_expense_form(text: str) -> dict:
     result: ExpenseForm = await extract_model.ainvoke([
         {
             "role": "system",
-            "content": f"""你是报销单填写助手。从用户的自然语言描述中提取报销信息，生成结构化表单。
-今天是 {today}。
-规则：
-1. 如果用户说"上周"，根据今天日期推算具体日期
-2. 金额务必精确，提到"约""大概"时保留原数字
-3. 如果描述中有金额超过单笔3000元的项目，在 warnings 里提示
-4. 如果报销事由不明确，在 warnings 里提示需要补充
-5. totalAmount 等于所有 items 的 amount 之和""",
+            "content": expense_parse_system(today),
         },
         {"role": "user", "content": text},
     ], config={"callbacks": [handler]})
@@ -113,14 +107,7 @@ async def parse_leave_form(text: str) -> dict:
     result: LeaveForm = await extract_model.ainvoke([
         {
             "role": "system",
-            "content": f"""你是请假申请助手。从用户的自然语言描述中提取请假信息。
-今天是 {today}。
-规则：
-1. "下周一到周三"等相对日期要换算成具体日期
-2. days 是自然日（含周末），workdays 是工作日（不含周末）
-3. 请假超过3个工作日时，在 warnings 里提示需要主管和 HR 双重审批
-4. 病假要在 warnings 里提示需要提供医院证明
-5. 产假/婚假要在 warnings 里提示需要提供相关证明材料""",
+            "content": leave_parse_system(today),
         },
         {"role": "user", "content": text},
     ], config={"callbacks": [handler]})

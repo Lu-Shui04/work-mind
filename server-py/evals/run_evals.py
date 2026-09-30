@@ -61,10 +61,10 @@ SUITE_FILES = {
     "erp_parse": "erp_parse.json",
 }
 
-# 命中"库里确实没有"时，服务必须说出来的话（两种写法都是当前实现的正式话术）：
-#   知识库中没有查到相关内容 —— fallback 模式下后端作为第一个 token 推出去的开场白
-#   知识库中未找到相关内容 —— 强制模式 / no_knowledge_reply 的固定答复
-# 二者取其一即可；编造公司规定却什么也不说，才算失败。
+# 命中"库里确实没有"时，服务必须说出来的话：
+#   知识库中没有查到相关内容 —— query.py::miss_reply() 的固定答复（对话与 Agent 共用），
+#                               后端作为第一个 token 推出去，不调用模型
+# 这几句取其一即可；编造公司规定却什么也不说，才算失败。
 MISS_PHRASES = [
     "知识库中没有查到相关内容",
     "知识库中未找到相关内容",
@@ -339,6 +339,8 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
 
     must_include      —— 全都要出现（数字、天数、金额这类硬事实）
     must_include_any  —— 每组里至少出现一个（同一件事的多种说法，避免判定过严）
+    must_not_include  —— 一个都不能出现（"用户没问的话题不要下结论"这类断言：
+                         例如目录类回答里绝不能冒出"未找到"，那是把没问的事说成库里没有）
     not_in_kb=true    —— 回答里必须出现"知识库中没有查到相关内容"之类的明示。
                          防的是"库里没有却编一条公司规定出来"（幻觉回归）。
                          注意：自动模式下后端本来就会把这句话作为第一个 token 推出去，
@@ -351,8 +353,10 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
     miss_ok = True
     if case.get("not_in_kb"):
         miss_ok = any(p in answer for p in MISS_PHRASES)
+    # 归一化后再比：排版空格/加粗符号不该影响"这句话有没有出现"
+    leaked = [k for k in (case.get("must_not_include") or []) if norm(k) in norm(answer)]
 
-    ok = not missing and not failed_groups and miss_ok
+    ok = not missing and not failed_groups and miss_ok and not leaked
     expect_parts = []
     if case.get("must_include"):
         expect_parts.append("必须包含 " + str(case["must_include"]))
@@ -360,6 +364,8 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
         expect_parts.append("每组至少命中其一 " + str(case["must_include_any"]))
     if case.get("not_in_kb"):
         expect_parts.append("必须明示「知识库中没有查到相关内容」")
+    if case.get("must_not_include"):
+        expect_parts.append("不允许出现 " + str(case["must_not_include"]))
     actual_txt = "回答（" + str(len(answer)) + " 字）：" + answer[:300]
     if missing:
         actual_txt += "\n❌ 缺少要点 " + str(missing)
@@ -367,6 +373,8 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
         actual_txt += "\n❌ 未命中任何说法 " + str(failed_groups)
     if not miss_ok:
         actual_txt += "\n❌ 库里没有这条内容，但回答里没有明示未命中（存在编造风险）"
+    if leaked:
+        actual_txt += "\n❌ 出现了不该出现的内容 " + str(leaked)
     return ok, "期望：" + "；".join(expect_parts) + "\n" + actual_txt, {"answer_chars": len(answer)}
 
 
@@ -516,8 +524,17 @@ def run_intent(case: dict, base_url: str, identity: dict) -> tuple:
 
 
 def run_answer_grounding(case: dict, base_url: str, identity: dict) -> tuple:
-    """回答集打 /api/chat/stream，取完整回答文本判定。"""
-    body = {"message": case["question"], "sessionId": "eval-ground-" + case["id"] + "-" + RUN_TAG}
+    """回答集打 /api/chat/stream，取完整回答文本判定。
+
+    prelude：先在**同一个会话**里问几句（结果丢弃），用来复现"上一轮的结论污染本轮"这类
+    多轮问题。ag-014 就靠它：先问一句必然未命中的话，让助手把"知识库中没有查到相关内容"
+    写进会话历史，再看本轮命中资料时会不会被带偏。
+    """
+    session_id = "eval-ground-" + case["id"] + "-" + RUN_TAG
+    for pre in case.get("prelude") or []:
+        post_sse(base_url, "/api/chat/stream",
+                 {"message": pre, "sessionId": session_id}, identity)
+    body = {"message": case["question"], "sessionId": session_id}
     if case.get("useKnowledge") is not None:
         body["useKnowledge"] = case["useKnowledge"]
     events = post_sse(base_url, "/api/chat/stream", body, identity)
@@ -759,7 +776,8 @@ def main() -> int:
         if args.concurrency > 1:
             with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
                 records = list(pool.map(
-                    lambda c: run_case(name, c, base_url, identity, args.verbose), cases))
+                    lambda c, suite=name: run_case(suite, c, base_url, identity, args.verbose),
+                    cases))
         else:
             records = [run_case(name, c, base_url, identity, args.verbose) for c in cases]
         summary = summarize(records)

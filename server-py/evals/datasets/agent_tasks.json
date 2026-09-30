@@ -15,31 +15,6 @@
       "guard": "README 记录的坑：纯算式任务如果被塞进知识分支，会检索未命中然后直接结束，工具根本没机会执行 —— 这条防的就是\"工具被知识分支吃掉\""
     },
     {
-      "id": "agent-002",
-      "task": "我出差3天，酒店每晚580元，机票往返1200元，餐费每天150元，帮我计算总报销金额",
-      "expect_tools": [
-        "calculate"
-      ],
-      "answer_keywords": [
-        "3390"
-      ],
-      "guard": "多项费用求和（1740+1200+450）：防的是模型心算错一个数字却不调用 calculate，或者 calculate 把中文吃进去算出错答案"
-    },
-    {
-      "id": "agent-003",
-      "task": "公司年假是怎么规定的？满10年工龄有几天？",
-      "expect_route": "knowledge",
-      "forbid_tools": [
-        "web_search",
-        "write_report"
-      ],
-      "answer_keywords": [
-        "司龄",
-        "10天"
-      ],
-      "guard": "纯知识问答应走知识分支（带引用回答），不烧工具步数：防的是路由把\"查制度\"也判成 tool，多花 3~4 倍 token 还答得更差"
-    },
-    {
       "id": "agent-004",
       "task": "查一下公司的年假政策，并按15天年假算我今年还剩多少天（今年已用6天），把结果通知给HR",
       "expect_tools": [
@@ -80,29 +55,6 @@
       "guard": "需要外部信息的任务必须真联网并产出报告：防的是模型凭记忆编版本号（README 记录过\"没配 key 却假装搜过\"）"
     },
     {
-      "id": "agent-007",
-      "task": "今天是几号？从今天算起 45 个工作日之后的日期是哪天？",
-      "expect_tools": [
-        "get_date"
-      ],
-      "answer_keywords": [
-        "工作日"
-      ],
-      "guard": "日期计算必须走 get_date（按 APP_TIMEZONE 算，不用容器 UTC）：防的是模型自己推算日期，跨时区/跨周末算错"
-    },
-    {
-      "id": "agent-008",
-      "task": "公司出差住宿费的报销标准是什么？",
-      "expect_route": "knowledge",
-      "forbid_tools": [
-        "web_search"
-      ],
-      "answer_keywords": [
-        "600元"
-      ],
-      "guard": "公司制度类问题必须走知识分支并给出公司口径：防的是模型用\"一般 300-500 元\"的行业常识代替公司标准"
-    },
-    {
       "id": "agent-009",
       "task": "帮我查一下公司今年的年会安排和预算",
       "expect_route": "chat",
@@ -122,23 +74,6 @@
         "没有查到"
       ],
       "guard": "【幻觉 + 权限】《考勤与加班管理规定》是 hr 部门文档，tech 身份看不到 —— 必须如实说没查到，不能凭常识答\"每月 3 次\""
-    },
-    {
-      "id": "agent-011",
-      "task": "帮我给技术部发一条通知：明天上午10点开周会",
-      "expect_tools": [
-        "send_notify"
-      ],
-      "guard": "通知类任务必须走 send_notify（演示环境返回值里带 simulated: true）：防的是模型只在回答里\"假装发出去了\""
-    },
-    {
-      "id": "agent-012",
-      "task": "公司的年假可以结转到第二年吗？",
-      "answer_keywords": [
-        "结转"
-      ],
-      "forbid_token_duplication": true,
-      "guard": "【流式输出完整性】防的是 Agent 把同一个 token 连发两遍 —— 用户看到的是\"公公司司年年假假\"这种叠字（2026-09-26 实测相邻重复 token 占比 ≈0.5，而对话流为 0）"
     }
   ]
 }

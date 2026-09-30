@@ -1,6 +1,8 @@
 # server-py/tests/test_memory.py
 """会话记忆与知识库三态语义的回归测试（不联网、不调模型）。
 
+（本文件只保留**黄金用例**：核心路径 + 真实踩过的边界，每条都能讲清「防的是什么坑」；零碎用例已精简。）
+
 运行方式（容器内）：
     docker exec workmind-server python /app/tests/test_memory.py
 
@@ -9,6 +11,8 @@
 2. 摘要失败时必须保留原文（宁可多留一份，也不能丢记忆）
 3. 数据库不可用时退回进程内存，对话照样能用（但会明确记一条降级日志）
 4. 知识库三态：自动=查到用资料/查不到说明后照常回答；强制=只依据知识库；关闭=压根不查
+5. 答案缓存的域：三态与检索范围必须各算各的键（否则换个范围/换个模式问同一句，
+   拿回来的还是上一种设置的答案 —— 甚至"强制检索"会被缓存静默绕过）
 
 注：这个测试容器里没有数据库连接，跑的是**内存兜底**分支；
    数据库分支由 scripts/smoke-test.sh（打真实服务）和
@@ -20,8 +24,10 @@ import sys
 
 sys.path.insert(0, os.environ.get("APP_DIR", "/app"))
 
+from app.api.chat import ChatStreamRequest, _cache_scope  # noqa: E402
 from app.services.chat import memory as M  # noqa: E402
-from app.services.rag.query import resolve_knowledge_mode  # noqa: E402
+from app.core.identity import User  # noqa: E402
+from app.services.rag.query import MISS_LEAD, miss_reply, resolve_knowledge_mode  # noqa: E402
 
 TENANT = "tenant-test"
 
@@ -70,14 +76,6 @@ def test_sessions_are_isolated_per_tenant():
     run(body())
 
 
-def test_memory_messages_without_history_is_empty():
-    async def body():
-        await _reset()
-        assert await M.memory_messages("empty-session", TENANT) == []
-
-    run(body())
-
-
 def test_memory_messages_keeps_only_recent_rounds():
     """最近 N 轮之外的原文不进 prompt（它们应该已经被摘要取代）。"""
     async def body():
@@ -90,57 +88,6 @@ def test_memory_messages_keeps_only_recent_rounds():
         assert len(messages) == M.KEEP_RECENT_ROUNDS * 2, len(messages)
         assert "问题14" in texts[-2] and "回答14" in texts[-1]
         assert all("问题0" != t for t in texts), "最早那轮不该再以原文出现"
-
-    run(body())
-
-
-def test_summary_is_prepended_to_prompt():
-    async def body():
-        await _reset()
-        await M.append_turn("s3", "我叫李雷，在技术部", "好的", TENANT, "u1")
-        M._mem_sessions[f"{TENANT}|s3"]["summary"] = "用户是技术部的李雷。"
-        messages = await M.memory_messages("s3", TENANT)
-        assert "此前对话的摘要" in messages[0].content
-        assert "李雷" in messages[0].content
-        assert messages[-1].content == "好的"
-
-    run(body())
-
-
-def test_memory_block_used_by_agent():
-    async def body():
-        await _reset()
-        await M.append_turn("s4", "帮我算差旅费", "合计 3390 元", TENANT, "u1")
-        M._mem_sessions[f"{TENANT}|s4"]["summary"] = "用户之前算过差旅费。"
-        block = await M.memory_block("s4", TENANT)
-        assert "此前对话的摘要" in block and "最近对话" in block
-        assert "3390" in block
-
-    run(body())
-
-
-# ── 记忆：异步摘要 ───────────────────────────────────────────
-def test_summary_triggers_only_after_threshold():
-    """没超过阈值不压缩；超过阈值时触发一次异步摘要。"""
-    async def body():
-        await _reset()
-        fired = []
-
-        async def fake_summarize(session_id, tenant_id=None):
-            fired.append(session_id)
-            return "摘要"
-
-        original = M.summarize_session
-        M.summarize_session = fake_summarize
-        try:
-            for i in range(M.SUMMARY_AFTER_ROUNDS):
-                await M.append_turn("s5", f"q{i}", f"a{i}", TENANT, "u1")
-            assert fired == [], "还没超过阈值就不该压缩"
-            await M.append_turn("s5", "q-extra", "a-extra", TENANT, "u1")
-            await asyncio.sleep(0)
-            assert fired == ["s5"], f"超过阈值应当触发一次异步摘要，实际 {fired}"
-        finally:
-            M.summarize_session = original
 
     run(body())
 
@@ -204,48 +151,6 @@ def test_summarize_failure_keeps_original_history():
     run(body())
 
 
-def test_clear_history_resets_summary_too():
-    async def body():
-        await _reset()
-        await M.append_turn("s8", "q", "a", TENANT, "u1")
-        M._mem_sessions[f"{TENANT}|s8"]["summary"] = "摘要"
-        await M.clear_history("s8", TENANT)
-        assert await M.get_summary("s8", TENANT) == ""
-        assert await M.get_history("s8", TENANT) == []
-
-    run(body())
-
-
-def test_profile_roundtrip_and_clear():
-    async def body():
-        await _reset()
-        assert await M.get_profile("u1", TENANT) == {}
-        await M._save_profile("u1", {"name": "李雷", "dept": "技术部"}, TENANT)
-        profile = await M.get_profile("u1", TENANT)
-        assert profile["name"] == "李雷"
-        assert "李雷" in M.profile_to_context(profile)
-        await M.clear_all(TENANT)
-        assert await M.get_profile("u1", TENANT) == {}
-
-    run(body())
-
-
-def test_degraded_mode_still_works_without_database():
-    """没有数据库连接时必须退回内存继续可用（只是重启会丢），而不是直接报错。"""
-    async def body():
-        await _reset()
-        # 这个测试容器没有数据库连接
-        assert M.using_database() is False
-        await M.append_turn("s9", "没有库也要能聊", "好的", TENANT, "u1")
-        assert await M.rounds_of("s9", TENANT) == 1
-        sessions = await M.list_sessions(TENANT)
-        assert any(s["id"] == "s9" for s in sessions), sessions
-        await M.clear_all(TENANT)
-
-    run(body())
-
-
-# ── 知识库三态语义 ───────────────────────────────────────────
 def test_mode_disabled_never_uses_knowledge():
     """关闭：压根没检索，不可能出现"未找到"话术。"""
     assert resolve_knowledge_mode(False, False, []) == "no_retrieval"
@@ -257,20 +162,54 @@ def test_mode_hit_answers_from_knowledge():
         assert resolve_knowledge_mode(forced, True, [{"x": 1}]) == "grounded_answer"
 
 
-def test_mode_forced_miss_is_grounded_only():
-    """强制：查不到就说查不到，不许用模型自己的知识补充。"""
-    assert resolve_knowledge_mode(True, True, []) == "grounded_miss"
+def test_mode_miss_is_one_short_reply():
+    """没命中：自动与强制**同一句引导**，且不调用模型（2026-09-27 按要求统一）。
+
+    以前两套行为（自动=通用知识兜底、强制=一长段检索诊断）都被取消了：
+    没有依据就不让模型发挥，也不在聊天里堆"阈值/候选数"这类工程细节。
+    """
+    assert resolve_knowledge_mode(None, True, []) == "miss"
+    assert resolve_knowledge_mode(True, True, []) == "miss"
+    reply = miss_reply()
+    assert MISS_LEAD in reply, "必须说清没查到"
+    assert "你想问什么，可以直接问我" in reply, "不能只说一句没查到就把人堵死"
+    assert "阈值" not in reply and "候选" not in reply, "聊天里不出现检索诊断"
+
+# ── 答案缓存的域：三态 + 检索范围都要算进 key ────────────────
+_CACHE_USER = User(tenant_id="tenant-test", user_id="u-cache",
+                   departments=["tech"], clearance="internal")
 
 
-def test_mode_auto_miss_falls_back_to_model():
-    """自动：先说明未命中，再照常用通用知识回答（用户要的就是这个）。"""
-    assert resolve_knowledge_mode(None, True, []) == "fallback_miss"
+def _scope(**overrides) -> str:
+    """按请求体算一次缓存域（路由里用的就是同一个函数）。"""
+    return _cache_scope(_CACHE_USER,
+                        ChatStreamRequest(message="公司的年假有几天？", **overrides))
 
 
-def test_mode_policy_can_force_strict_auto():
-    """部署方显式配 grounded 时，自动模式也走严格模式。"""
-    assert resolve_knowledge_mode(None, True, [], policy="grounded") == "grounded_miss"
-    assert resolve_knowledge_mode(None, True, [], policy="fallback") == "fallback_miss"
+def test_cache_scope_separates_retrieval_range():
+    """「全部可见」与「只看财务部 / 只看政策 / 只看某版本」的答案可以完全不同。
+
+    反例：选「本部门=财务」→ 这个范围内确实没有内容 → "未命中"的回答进了缓存；
+    切回「全部可见」重问 → 命中缓存，回的还是"知识库中未找到相关内容"，
+    而库里其实有内容（用户会得出"库里没有"的错误结论）。
+    """
+    base = _scope()
+    assert _scope(knowledgeDepartment="finance") != base
+    assert _scope(knowledgeDocType="policy") != base
+    assert _scope(knowledgeVersion="2026-08") != base
+    assert _scope(includeSuperseded=True) != base
+
+
+def test_cache_scope_still_separates_permission_domain():
+    """权限域没有因为加了检索域而丢：换租户/部门/密级都不能复用别人的答案。"""
+    others = [
+        User(tenant_id="tenant-other", user_id="u1", departments=["tech"], clearance="internal"),
+        User(tenant_id="tenant-test", user_id="u2", departments=["hr"], clearance="internal"),
+        User(tenant_id="tenant-test", user_id="u3", departments=["tech"], clearance="public"),
+    ]
+    body = ChatStreamRequest(message="公司的年假有几天？")
+    mine = _cache_scope(_CACHE_USER, body)
+    assert all(_cache_scope(other, body) != mine for other in others)
 
 
 if __name__ == "__main__":

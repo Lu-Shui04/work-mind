@@ -9,8 +9,23 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from app.services.model import create_chat_model
-from app.utils.logger import logger
+from app.models.llm import create_chat_model
+from app.core.logger import logger
+from app.prompts.workflow import (
+    EMAIL_INTENT_SYSTEM,
+    EMAIL_ISSUES_SYSTEM,
+    MEETING_ACTIONS_SYSTEM,
+    MEETING_ATTENDEES_SYSTEM,
+    MEETING_CONCLUSIONS_SYSTEM,
+    PRD_CONSTRAINTS_SYSTEM,
+    PRD_FEATURES_SYSTEM,
+    WEEKLY_HIGHLIGHTS_SYSTEM,
+    WEEKLY_RISKS_SYSTEM,
+    email_polish_system,
+    meeting_minutes_system,
+    prd_skeleton_system,
+    weekly_report_system,
+)
 
 # 工作流用 temperature=0.7，输出更自然
 #
@@ -44,7 +59,7 @@ def build_weekly_report():
     async def extract_highlights(state: WeeklyReportState):
         logger.info("workflow:weekly → extractHighlights")
         chain = ChatPromptTemplate.from_messages([
-            ("system", '你是写作助手，从工作要点中提炼亮点。输出3-5条，每条一行，用"• "开头，不超过30字。'),
+            ("system", WEEKLY_HIGHLIGHTS_SYSTEM),
             ("human", "工作要点：\n{points}"),
         ]) | _model | _parser
         highlights = await chain.ainvoke({"points": state.get("points", "")})
@@ -53,7 +68,7 @@ def build_weekly_report():
     async def identify_risks(state: WeeklyReportState):
         logger.info("workflow:weekly → identifyRisks")
         chain = ChatPromptTemplate.from_messages([
-            ("system", '从工作内容中识别风险和阻塞项。如果没有明显风险，输出"本周无明显风险项"。输出2-3条，每条一行。'),
+            ("system", WEEKLY_RISKS_SYSTEM),
             ("human", "工作要点：\n{points}"),
         ]) | _model0 | _parser
         risks = await chain.ainvoke({"points": state.get("points", "")})
@@ -67,7 +82,7 @@ def build_weekly_report():
         logger.info("workflow:weekly → generateReport")
         feedback_note = f"\n\n注意事项：{state['humanFeedback']}" if state.get("humanFeedback") else ""
         chain = ChatPromptTemplate.from_messages([
-            ("system", f"你是专业的报告撰写助手，生成结构清晰的周报。{feedback_note}"),
+            ("system", weekly_report_system(feedback_note)),
             ("human", """部门：{dept}
 本周工作亮点：
 {highlights}
@@ -126,7 +141,7 @@ def build_meeting_minutes():
     async def extract_attendees(state: MeetingMinutesState):
         logger.info("workflow:meeting → extractAttendees")
         chain = ChatPromptTemplate.from_messages([
-            ("system", "从会议记录中提取参会人员和主要议题。格式：参会人：xxx、xxx\n主要议题：xxx"),
+            ("system", MEETING_ATTENDEES_SYSTEM),
             ("human", "会议记录：\n{rawNotes}"),
         ]) | _model0 | _parser
         attendees = await chain.ainvoke({"rawNotes": state.get("rawNotes", "")})
@@ -135,7 +150,7 @@ def build_meeting_minutes():
     async def extract_conclusions(state: MeetingMinutesState):
         logger.info("workflow:meeting → extractConclusions")
         chain = ChatPromptTemplate.from_messages([
-            ("system", '从会议记录中提取达成的结论和决策，每条以"✓"开头，不超过25字。如无明确结论，写"待下次会议确认"。'),
+            ("system", MEETING_CONCLUSIONS_SYSTEM),
             ("human", "会议记录：\n{rawNotes}"),
         ]) | _model0 | _parser
         conclusions = await chain.ainvoke({"rawNotes": state.get("rawNotes", "")})
@@ -144,9 +159,7 @@ def build_meeting_minutes():
     async def extract_action_items(state: MeetingMinutesState):
         logger.info("workflow:meeting → extractActionItems")
         chain = ChatPromptTemplate.from_messages([
-            ("system", """从会议记录中提取 Action Items（后续行动项）。
-每条格式：【负责人】事项内容（截止时间）
-如果没有明确负责人，写"待定"。如果没有截止时间，写"尽快"。"""),
+            ("system", MEETING_ACTIONS_SYSTEM),
             ("human", "会议记录：\n{rawNotes}"),
         ]) | _model0 | _parser
         action_items = await chain.ainvoke({"rawNotes": state.get("rawNotes", "")})
@@ -162,7 +175,7 @@ def build_meeting_minutes():
         feedback = f"\n修改意见：{state['humanFeedback']}" if state.get("humanFeedback") else ""
 
         chain = ChatPromptTemplate.from_messages([
-            ("system", f"你是会议纪要撰写助手，生成正式会议纪要。{feedback}"),
+            ("system", meeting_minutes_system(feedback)),
             ("human", f"""会议名称：{{title}}
 日期：{today}
 {{attendees}}
@@ -216,7 +229,7 @@ def build_email_polish():
     async def analyze_intent(state: EmailPolishState):
         logger.info("workflow:email → analyzeIntent")
         chain = ChatPromptTemplate.from_messages([
-            ("system", "分析邮件的写作目的、语气和受众，输出2-3句话的简短分析。"),
+            ("system", EMAIL_INTENT_SYSTEM),
             ("human", "收件人：{recipient}\n邮件草稿：\n{draft}"),
         ]) | _model0 | _parser
         purpose = await chain.ainvoke({"draft": state.get("draft", ""), "recipient": state.get("recipient") or "对方"})
@@ -225,9 +238,7 @@ def build_email_polish():
     async def check_issues(state: EmailPolishState):
         logger.info("workflow:email → checkIssues")
         chain = ChatPromptTemplate.from_messages([
-            ("system", """检查邮件草稿的问题，按优先级列出，每条不超过20字。
-检查维度：语气是否合适、逻辑是否清晰、用词是否专业、有无歧义、结尾是否得体。
-如果没有明显问题，输出"整体质量良好，建议微调措辞使其更专业"。"""),
+            ("system", EMAIL_ISSUES_SYSTEM),
             ("human", "邮件草稿：\n{draft}"),
         ]) | _model0 | _parser
         issues = await chain.ainvoke({"draft": state.get("draft", "")})
@@ -241,8 +252,7 @@ def build_email_polish():
         logger.info("workflow:email → polishEmail")
         feedback = f"\n用户要求：{state['humanFeedback']}" if state.get("humanFeedback") else ""
         chain = ChatPromptTemplate.from_messages([
-            ("system", f"""你是专业邮件润色助手，根据分析结果优化邮件。{feedback}
-保持原意，不改变核心内容，只优化表达。输出完整的润色后邮件，包括称呼、正文、结尾。"""),
+            ("system", email_polish_system(feedback)),
             ("human", """原始草稿：
 {draft}
 
@@ -288,7 +298,7 @@ def build_prd_skeleton():
     async def extract_features(state: PrdSkeletonState):
         logger.info("workflow:prd → extractFeatures")
         chain = ChatPromptTemplate.from_messages([
-            ("system", "从需求描述中提取核心功能点。按优先级排序，格式：P0/P1/P2 + 功能描述，每条一行。"),
+            ("system", PRD_FEATURES_SYSTEM),
             ("human", "需求描述：\n{description}"),
         ]) | _model0 | _parser
         features = await chain.ainvoke({"description": state.get("description", "")})
@@ -297,10 +307,7 @@ def build_prd_skeleton():
     async def identify_constraints(state: PrdSkeletonState):
         logger.info("workflow:prd → identifyConstraints")
         chain = ChatPromptTemplate.from_messages([
-            ("system", """从需求中识别技术约束和业务约束。
-技术约束：性能要求、兼容性、安全性等。
-业务约束：时间限制、预算、合规要求等。
-如果描述中没有提及，写"待确认"。"""),
+            ("system", PRD_CONSTRAINTS_SYSTEM),
             ("human", "需求描述：\n{description}"),
         ]) | _model0 | _parser
         constraints = await chain.ainvoke({"description": state.get("description", "")})
@@ -314,8 +321,7 @@ def build_prd_skeleton():
         logger.info("workflow:prd → generatePrd")
         feedback = f"\n补充说明：{state['humanFeedback']}" if state.get("humanFeedback") else ""
         chain = ChatPromptTemplate.from_messages([
-            ("system", f"""你是产品经理助手，生成结构化 PRD 文档骨架。{feedback}
-输出完整的 Markdown 格式 PRD，各章节有具体内容，不要只写标题。"""),
+            ("system", prd_skeleton_system(feedback)),
             ("human", """需求描述：{description}
 
 功能点：

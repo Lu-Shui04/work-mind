@@ -13,23 +13,22 @@
 - 已做版本治理：新版本入库时自动把旧版本标记 superseded（见 registry.supersede_previous）。
 - 源文件保留在 uploads/ 下（不再入库后删除），用于"查看源文件 / 重新解析 / 溯源下载"。
 """
-import hashlib
 import os
 import random
 import re
 import time
 from datetime import datetime, timezone
 
-from app.schemas.document import (
-    ChunkRecord, DocStatus, DocumentMetadata, DocumentRecord, ElementType,
+from app.models.schemas import (
+    ChunkRecord, DocumentMetadata, DocumentRecord, ElementType,
     IngestStatus,
 )
-from app.services.db import VECTOR_DIM
-from app.services.model import embeddings, embeddings_tier_name
+from app.core.db import VECTOR_DIM
+from app.models.llm import embeddings, embeddings_tier_name
 from app.services.rag.parser import parse_document
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
-from app.utils.logger import logger
+from app.core.logger import logger
 
 # 切片参数（可用环境变量覆盖；每个文档入库时会把实际参数记进元数据，便于复现与回溯）
 #   TARGET  目标长度：正文按这个粒度聚合
@@ -59,8 +58,8 @@ def _record_embedding_usage(chars: int, started: float, doc) -> None:
     estimated=True —— 看板上会显示成"估算"。不记的话，一篇几百页的文档入库
     在看板上是 ¥0，用户会以为"知识库不花钱"，而它其实是调用量最大的一块。
     """
-    from app.routes.monitor import record_api_call
-    from app.utils.tokens import estimate_tokens_from_chars
+    from app.api.monitor import record_api_call
+    from app.infra.tokens import estimate_tokens_from_chars
 
     if chars <= 0:
         return
@@ -77,14 +76,6 @@ def _record_embedding_usage(chars: int, started: float, doc) -> None:
         user_id=getattr(doc, "created_by", "") or "",
         estimated=True,
     )
-
-
-def sha256_of(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
 
 
 def _split_long_text(text: str, target: int = TARGET_CHUNK_CHARS,

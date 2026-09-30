@@ -32,7 +32,8 @@ import time
 
 from pydantic import BaseModel, Field
 
-from app.services.trace import trace_step
+from app.prompts.rag import INTENT_SYSTEM
+from app.infra.trace import trace_step
 
 # recall_first（默认，召回优先） / strict（旧的"规则+模型"判定）
 RAG_INTENT_MODE = (os.getenv("RAG_INTENT_MODE", "recall_first") or "recall_first").lower()
@@ -178,14 +179,10 @@ async def _classify_intent(message: str) -> IntentDecision:
 async def _model_fallback(message: str) -> IntentDecision:
     """仅在 strict 模式下使用：一次极小的结构化输出调用（失败按"不检索"处理）。"""
     try:
-        from app.services.model import create_chat_model
+        from app.models.llm import create_chat_model
         model = create_chat_model(temperature=0, streaming=False)
         result = await model.with_structured_output(_ModelIntent, method="function_calling").ainvoke([
-            {"role": "system", "content": (
-                "判断用户问题是否需要查阅公司内部文档（制度/流程/规范/规定）才能回答。\n"
-                "只要可能与企业自有资料相关就判需要；通用常识、闲聊、写作、计算类问题不需要。\n"
-                "部门只能取 hr/finance/tech/legal/product/general。"
-            )},
+            {"role": "system", "content": INTENT_SYSTEM},
             {"role": "user", "content": message},
         ])
         dept = result.department_hint if result.department_hint in _DOMAIN_KEYWORDS else None

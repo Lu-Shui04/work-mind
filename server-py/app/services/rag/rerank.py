@@ -25,10 +25,11 @@ import httpx
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
-from app.services.model import create_chat_model, primary_model_name
-from app.services.trace import trace_step
-from app.utils.logger import logger
-from app.utils.tokens import estimate_tokens_many, sum_usage
+from app.models.llm import create_chat_model, primary_model_name
+from app.prompts.rag import RERANK_SYSTEM
+from app.infra.trace import trace_step
+from app.core.logger import logger
+from app.infra.tokens import estimate_tokens_many, sum_usage
 
 PROVIDER = (os.getenv("RERANK_PROVIDER", "llm") or "llm").lower()
 # 一次最多重排多少条候选（LLM 重排的 prompt 长度与费用由它决定）
@@ -94,18 +95,6 @@ class _Scores(BaseModel):
     scores: list[_Score] = Field(description="每个候选的相关性打分")
 
 
-_LLM_SYSTEM = """你是检索结果重排器。给定一个查询和若干候选片段，判断**每条片段能否直接回答这个查询**。
-
-打分标准（0-10）：
-- 9-10：直接包含答案，照它就能回答
-- 6-8：强相关，包含答案的大部分要素
-- 3-5：主题沾边，但不回答这个具体问题
-- 0-2：无关
-
-只按"能否回答该查询"打分，不要因为片段本身写得详细就打高分。
-必须给每个候选都打分，编号与输入一致。"""
-
-
 async def _rerank_llm(query: str, docs: list[str],
                      handler: UsageMetadataCallbackHandler | None = None) -> list[float] | None:
     model = create_chat_model(temperature=0, streaming=False)
@@ -113,7 +102,7 @@ async def _rerank_llm(query: str, docs: list[str],
     # 挂 handler 才能拿到真实 token：with_structured_output 返回的是解析后的对象，没有 usage
     config = {"callbacks": [handler]} if handler is not None else None
     result = await model.with_structured_output(_Scores, method="function_calling").ainvoke([
-        {"role": "system", "content": _LLM_SYSTEM},
+        {"role": "system", "content": RERANK_SYSTEM},
         {"role": "user", "content": f"查询：{query}\n\n候选片段：\n{listing}"},
     ], config=config)
     scores = [0.0] * len(docs)

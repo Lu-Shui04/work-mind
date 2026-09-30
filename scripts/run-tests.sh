@@ -29,9 +29,10 @@ if [ -f .env ]; then ENV_ARGS=(--env-file .env); fi
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
 else
-  # 默认全集：解析/工具/记忆 + 韧性（不联网）+ 故障注入（要联网，验证降级真的能用）
+  # 默认全集：解析/工具/记忆/本轮依据块 + Agent 图契约 + 韧性（不联网）+ 故障注入（要联网）
   TARGETS=(tests/test_parser_cross_page.py tests/test_agent_tools.py tests/test_memory.py
-           tests/test_resilience.py tests/test_fallback.py)
+           tests/test_turn_context.py tests/test_resilience.py tests/test_agent_graph.py
+           tests/test_fallback.py)
 fi
 
 for target in "${TARGETS[@]}"; do

@@ -50,7 +50,7 @@ jobs:
           APP_DIR: ${{ github.workspace }}/server-py
         run: |
           set -euo pipefail
-          for t in tests/test_resilience.py tests/test_memory.py tests/test_agent_tools.py tests/test_parser_cross_page.py; do
+          for t in tests/test_resilience.py tests/test_memory.py tests/test_turn_context.py tests/test_agent_tools.py tests/test_parser_cross_page.py tests/test_agent_graph.py; do
             echo "::group::$t"
             python "$t"
             echo "::endgroup::"

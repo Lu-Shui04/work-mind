@@ -22,10 +22,11 @@ from typing import Literal
 from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
-from app.services import pricing
-from app.services.model import create_chat_model, primary_model_name
-from app.utils.logger import logger
-from app.utils.tokens import sum_usage
+from app.models import pricing
+from app.models.llm import create_chat_model, primary_model_name
+from app.prompts.erp import approval_system
+from app.core.logger import logger
+from app.infra.tokens import sum_usage
 
 _review_model = create_chat_model(temperature=0)
 
@@ -137,8 +138,8 @@ def _now_iso() -> str:
 def _record_review_usage(handler: UsageMetadataCallbackHandler, started: float,
                          role_id: str = "", decision: str = "") -> dict:
     """把这一次审批节点的模型用量记到看板（feature=erp），并记一步全链路追踪。"""
-    from app.routes.monitor import record_api_call
-    from app.services.trace import trace_step
+    from app.api.monitor import record_api_call
+    from app.infra.trace import trace_step
 
     input_tokens, output_tokens, cached_tokens = sum_usage(handler.usage_metadata)
     latency_ms = round((time.time() - started) * 1000)
@@ -173,15 +174,8 @@ async def review_application(role_id: str, form_data: dict, form_type: str,
     for a in applicant_answers:
         context_lines.append(f"[申请人补充说明] {a.get('answer', '')}")
 
-    system = (
-        f"你是{APPROVAL_ROLES[role_id]['name']}。{spec['duty']}\n"
-        f"请逐条检查：{'；'.join(spec['checks'])}。\n"
-        "要求：信息足够就给出 approve/reject；只要存在**必须由申请人补充或修改**才能判断的疑点，"
-        "就返回 need_info 并列出具体问题，不要自己替他假设。宁可 need_info，也不要含糊通过。"
-    )
-    if force_decision:
-        # 已经补充过一轮材料：不再允许继续追问，必须给出明确结论（避免流程无限打转）
-        system += "\n【重要】申请人已经补充过说明，本轮**必须**给出 approve 或 reject，不允许再返回 need_info。"
+    system = approval_system(APPROVAL_ROLES[role_id]["name"], spec["duty"], spec["checks"],
+                             force_decision)
     user = (
         f"申请内容（你被允许看到的字段）：\n{json.dumps(view, ensure_ascii=False, indent=2)}\n\n"
         f"已有上下文：\n" + ("\n".join(context_lines) if context_lines else "（无）")

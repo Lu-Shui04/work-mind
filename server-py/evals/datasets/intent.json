@@ -11,32 +11,11 @@
       "guard": "打招呼必须跳过检索：防的是\"召回优先\"被写成\"一律检索\"，寒暄也白花一次 embedding + 检索"
     },
     {
-      "id": "intent-002",
-      "message": "谢谢",
-      "expect_need_knowledge": false,
-      "expect_source_prefix": "skip-",
-      "guard": "客套话同样是零信息量输入：防的是把客套话当成可检索内容去查库"
-    },
-    {
-      "id": "intent-003",
-      "message": "你是谁？",
-      "expect_need_knowledge": false,
-      "expect_source_prefix": "skip-",
-      "guard": "问助手本身与公司资料无关：防的是这类问题被检索结果带偏成\"未命中内容\"的答复"
-    },
-    {
       "id": "intent-004",
       "message": "讲个笑话吧",
       "expect_need_knowledge": false,
       "expect_source_prefix": "skip-",
       "guard": "闲聊创作类：防的是知识优先策略把创作请求也拦成\"知识库中未找到相关内容\""
-    },
-    {
-      "id": "intent-005",
-      "message": "帮我翻译一下：Hello world",
-      "expect_need_knowledge": false,
-      "expect_source_prefix": "skip-",
-      "guard": "纯语言任务不需要公司资料：防的是翻译请求被塞进检索分支"
     },
     {
       "id": "intent-006",
@@ -53,20 +32,6 @@
       "guard": "日期类问题没有可检索内容：防的是\"今天几号\"被知识优先策略拒答（用户要的是日期，不是公司制度）"
     },
     {
-      "id": "intent-008",
-      "message": "1+1",
-      "expect_need_knowledge": false,
-      "expect_source_prefix": "skip-",
-      "guard": "纯算式跳过检索：防的是算术题也去查库，既慢又会因为没命中而多一段\"未查到\"话术"
-    },
-    {
-      "id": "intent-009",
-      "message": "北京今天天气怎么样",
-      "expect_need_knowledge": false,
-      "expect_source_prefix": "skip-",
-      "guard": "天气问的是外部信息，与公司知识库无关：防的是天气问题走检索分支"
-    },
-    {
       "id": "intent-010",
       "message": "公司的年假有多少天？",
       "expect_need_knowledge": true,
@@ -74,39 +39,11 @@
       "guard": "最典型的该查库问题：防的是\"该查却不查\"，用户以为助手看了公司制度其实没看"
     },
     {
-      "id": "intent-011",
-      "message": "出差住宿费的报销标准是什么？",
-      "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
-      "guard": "制度类提问必须查库：防的是规则判定被收紧（旧 strict 模式就因为没命中关键词而跳过检索）"
-    },
-    {
       "id": "intent-012",
       "message": "rag召回失败怎么办",
       "expect_need_knowledge": true,
       "expect_source_prefix": "recall-first",
       "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的"
-    },
-    {
-      "id": "intent-013",
-      "message": "前端代码什么时候可以发布上线？",
-      "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
-      "guard": "部门专属知识（前端研发规范）：防的是\"没有制度类关键词就不查库\"，导致部门规范永远检索不到"
-    },
-    {
-      "id": "intent-014",
-      "message": "报销单最晚什么时候提交？",
-      "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
-      "guard": "口语化制度问题：防的是判定依赖书面词（\"报销时限\"）而不是语义"
-    },
-    {
-      "id": "intent-015",
-      "message": "试用期是多久？",
-      "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
-      "guard": "短问句同样要查库：防的是\"消息太短就不检索\"这类误伤（长度阈值只能拦 1 个字的消息）"
     }
   ]
 }

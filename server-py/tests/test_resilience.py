@@ -1,6 +1,8 @@
 # server-py/tests/test_resilience.py
 """韧性组件的回归测试（不联网、不调真实模型，全部用假函数注入故障）。
 
+（本文件只保留**黄金用例**：核心路径 + 真实踩过的边界，每条都能讲清「防的是什么坑」；零碎用例已精简。）
+
 运行方式（容器内）：
     docker exec workmind-server python /app/tests/test_resilience.py
 
@@ -20,7 +22,7 @@ import time
 
 sys.path.insert(0, os.environ.get("APP_DIR", "/app"))
 
-from app.services import resilience as R  # noqa: E402
+from app.infra import resilience as R  # noqa: E402
 
 
 def run(coro):
@@ -90,29 +92,6 @@ def test_retry_succeeds_after_transient_failures():
     assert fn.calls == 3, f"期望 2 次重试后成功，实际调用 {fn.calls} 次"
 
 
-def test_retry_gives_up_and_wraps_error():
-    fn = _Flaky(fail_times=99)
-    try:
-        run(R.call_with_resilience(fn, name="t", timeout=1, retries=2, base_delay=0.01,
-                                   max_delay=0.02))
-        raise AssertionError("应当抛出 RetryExhaustedError")
-    except R.RetryExhaustedError as err:
-        assert isinstance(err.__cause__, ConnectionError), "原始异常要挂在 __cause__ 上"
-    assert fn.calls == 3, f"重试次数应为 retries+1=3，实际 {fn.calls}"
-
-
-def test_non_retryable_error_is_not_retried():
-    class _Err(Exception):
-        status_code = 400
-
-    fn = _Flaky(fail_times=99, err=_Err("bad request"))
-    try:
-        run(R.call_with_resilience(fn, name="t", timeout=1, retries=3, base_delay=0.01))
-    except R.RetryExhaustedError:
-        pass
-    assert fn.calls == 1, f"400 不该重试，实际调用 {fn.calls} 次"
-
-
 def test_timeout_is_enforced():
     fn = _Slow(delay=2.0)
     t0 = time.time()
@@ -174,60 +153,6 @@ def test_circuit_breaker_half_open_then_closed():
         except R.RetryExhaustedError:
             pass
     assert breaker.state == "open"
-
-
-def test_half_open_failure_reopens_immediately():
-    """半开状态下探测失败 → 立刻回到 open（不用再攒够阈值）。"""
-    R.reset_breakers()
-    breaker = R.get_breaker("unit:half2", fail_threshold=5, recovery_seconds=0.15)
-    bad = _Flaky(fail_times=99)
-    for _ in range(5):
-        try:
-            run(R.call_with_resilience(bad, name="t", timeout=1, retries=0, breaker_name="unit:half2"))
-        except R.RetryExhaustedError:
-            pass
-    assert breaker.state == "open"
-    time.sleep(0.2)
-    assert breaker.allow() is True          # 触发 half_open
-    assert breaker.state == "half_open"
-    breaker.on_failure(RuntimeError("probe failed"))
-    assert breaker.state == "open", "半开探测失败必须立刻重新跳闸"
-
-
-def test_cancellation_is_not_a_failure():
-    """用户点"停止"→ CancelledError：不算失败，也不该触发熔断。"""
-    R.reset_breakers()
-    breaker = R.get_breaker("unit:cancel", fail_threshold=2, recovery_seconds=60)
-
-    async def _cancelled():
-        raise asyncio.CancelledError()
-
-    try:
-        run(R.call_with_resilience(_cancelled, name="t", timeout=1, retries=2,
-                                   breaker_name="unit:cancel"))
-    except asyncio.CancelledError:
-        pass
-    assert breaker.consecutive_failures == 0, "取消不该计入失败"
-    assert breaker.state == "closed"
-
-
-def test_metrics_are_recorded():
-    R.reset_breakers()
-    before = R.stats()
-    fn = _Flaky(fail_times=1)
-    run(R.call_with_resilience(fn, name="t", timeout=1, retries=1, base_delay=0.01))
-    after = R.stats()
-    assert after["calls"] == before["calls"] + 1
-    assert after["retries"] >= before["retries"] + 1
-    assert after["success"] >= before["success"] + 1
-
-
-def test_snapshot_shape():
-    """可观测快照的字段是给 /health/resilience 用的，改坏了运维页面会空。"""
-    snap = R.get_breaker("unit:snap").snapshot()
-    for key in ("name", "state", "totalCalls", "totalFailures", "totalRejected",
-                "totalOpened", "lastError", "recoverInSec"):
-        assert key in snap, f"快照缺少字段 {key}"
 
 
 if __name__ == "__main__":

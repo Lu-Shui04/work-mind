@@ -11,10 +11,10 @@
 """
 from __future__ import annotations
 
-from app.schemas.document import ChunkRecord
-from app.services.db import require_pool
-from app.services.trace import trace_step
-from app.utils.logger import logger
+from app.models.schemas import ChunkRecord
+from app.core.db import require_pool
+from app.infra.trace import trace_step
+from app.core.logger import logger
 
 _INSERT_COLUMNS = ("chunk_id", "doc_id", "tenant_id", "order_index", "department", "version",
                    "doc_type", "security_level", "page_number", "page_end",

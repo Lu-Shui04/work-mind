@@ -35,7 +35,7 @@
 import re
 import time
 
-from app.schemas.document import ElementType, ParsedDocument, ParsedElement
+from app.models.schemas import ElementType, ParsedDocument, ParsedElement
 
 # 非分页格式（md/txt）的"伪分页"粒度：每 2000 字算一页，
 # 给无页码文档也提供稳定的定位锚点。

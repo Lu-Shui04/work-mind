@@ -27,18 +27,20 @@ from app.services.agent.tools import (
     all_tools, guarded_tools, reset_tool_call_log, set_tool_call_log,
 )
 from app.services.chat.memory import append_turn, memory_block
-from app.services.db import StorageUnavailable
-from app.services.identity import User, get_current_user, reset_current_user, set_current_user
-from app.services import pricing
-from app.services.model import create_chat_model, primary_model_name
+from app.core.db import StorageUnavailable
+from app.core.identity import User, get_current_user, reset_current_user, set_current_user
+from app.models import pricing
+from app.models.llm import create_chat_model, primary_model_name
 from app.services.rag.intent import classify_intent
-from app.services.trace import trace_step
-from app.services.rag.query import (
-    MISS_FIRST_RULE, SearchFilters, build_context, miss_notice as miss_notice_text,
-    no_knowledge_reply, retrieve_with_meta,
+from app.infra.trace import trace_step
+from app.services.rag.query import SearchFilters, build_context, retrieve_with_meta
+from app.prompts.chat import MISS_FIRST_RULE, miss_notice as miss_notice_text, miss_reply
+from app.prompts.agent import (
+    CHAT_SYSTEM, KNOWLEDGE_SYSTEM, ROUTE_SYSTEM, agent_system, finalize_system,
+    FINALIZE_RETRY_SYSTEM,
 )
-from app.utils.logger import logger
-from app.utils.tokens import cache_read_of
+from app.core.logger import logger
+from app.infra.tokens import cache_read_of
 
 
 def _tool_catalog() -> str:
@@ -76,32 +78,8 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "14"))
 # 实测把 MAX_STEPS 从 10 调到 14 时正好踩到这一点。
 RECURSION_LIMIT = MAX_STEPS * 2 + 5
 
-AGENT_SYSTEM = f"""你是 WorkMind AI 任务助手，专门处理办公场景的复杂任务。
-
-可用工具：
-{_tool_catalog()}
-
-工作原则：
-1. 先理解任务的完整需求，想好需要哪些步骤
-2. 按最少工具调用完成任务，避免重复查询
-3. 需要外部信息（最新版本、资讯、行情等）时不凭记忆编造，用 web_search 查
-4. 收集到足够信息后，用 write_report 产出结构化报告
-5. 获取到足够信息后立刻生成最终回答，不要继续无谓的工具调用
-6. 工具返回内容不足时如实说明，不要编造
-7. 每次只调用一个工具，等结果回来再决定下一步
-8. **不要在同一个问题上反复搜索**：同一个关键词不要搜第二遍，换个说法搜同一件事也算重复；
-   搜了 3~4 次还没拿到关键信息，就基于已有信息给结论并说明缺什么，不要无限搜下去
-9. 最多 {MAX_STEPS} 步；接近上限时先输出结论，别把步数花在收尾之外的调用上"""
-
-CHAT_SYSTEM = "你是 WorkMind AI 助手，回答简洁专业。不知道的信息如实说明，不要编造公司内部规定。"
-
-KNOWLEDGE_SYSTEM = """你是 WorkMind AI 知识库助手。
-
-规则：
-1. 只根据下方提供的参考文档回答问题，不使用文档之外的知识
-2. 如果文档中没有相关内容，明确说"知识库中未找到相关内容"
-3. 回答准确简洁；引用资料时直接在句末写方括号编号，例如 [1] 或 [1][3]
-   （编号就是资料列表里的序号，不要写【来源：文档标题 · 第N页】这种长句）"""
+# 提示词本身在 app/prompts/agent.py（提示词层），这里只把"运行时要插的值"喂进去
+AGENT_SYSTEM = agent_system(_tool_catalog(), MAX_STEPS)
 
 
 class AgentState(TypedDict):
@@ -121,6 +99,18 @@ class AgentState(TypedDict):
     # 由 run_agent 注入，各分支把它拼进自己的 system prompt ——
     # 这样"上一个任务说过什么"在工具循环、直接回答、收尾里都看得见。
     memory: str
+    # 意图判定给出的检索词与部门提示（部门提示只做提示/解释，不做硬过滤，
+    # 见 rag/query.py 的 SearchFilters）。
+    #
+    # ⚠️ 这两个字段**必须声明在这里**：StateGraph 的状态通道就是按本 TypedDict 的注解建的，
+    #    run_agent 往 astream_events 里多传的键会被 LangGraph **静默丢掉** ——
+    #    不报错、不警告，节点里 state.get() 直接是 None（实测确认）。
+    #    之前它们漏在注解外，于是 knowledge_retrieve 里的
+    #    state.get("department_hint") / state.get("search_query") 永远是 None：
+    #    一旦路由改动让"入口不预检索"那条兜底路径真的跑起来，部门提示与改写后的检索词
+    #    就会静默失效（退回用原句检索），而且没有任何报错可查。
+    department_hint: str
+    search_query: str
 
 
 # ── 意图分类 ──────────────────────────────────────────────────────────
@@ -172,11 +162,7 @@ def _tool_capability_need(task: str) -> str | None:
 async def classify_task(task: str) -> _RouteDecision:
     try:
         return await _router_model.with_structured_output(_RouteDecision, method="function_calling").ainvoke([
-            {"role": "system", "content":
-                "你是任务路由器，判断任务应该走哪条执行路径。"
-                "只要任务需要工具（联网搜索舆情/版本/资讯、计算、日期、生成报告、发通知）才能完成，"
-                "就选 tool —— 即使它同时也包含写作成分（例如'查最新版本并生成报告'仍是 tool）；"
-                "只有完全不需要工具、也不需要公司文档时才选 chat。"},
+            {"role": "system", "content": ROUTE_SYSTEM},
             {"role": "user", "content": task},
         ])
     except Exception as err:
@@ -218,8 +204,9 @@ async def knowledge_retrieve(state: AgentState):
 async def knowledge_answer(state: AgentState):
     sources = state.get("sources") or []
     if not sources:
-        # 与智能对话共用同一套"未命中"答复：说清楚为什么没找到 + 下一步怎么办
-        return {"messages": [AIMessage(content=no_knowledge_reply(state.get("recall")))]}
+        # 与智能对话共用同一句"未命中"答复（query.py 的 miss_reply）：
+        # 说清没查到 + 引导用户把问题问具体，不调用模型、不拿通用知识顶
+        return {"messages": [AIMessage(content=miss_reply())]}
 
     context = build_context(sources)
     prompt = [
@@ -335,14 +322,7 @@ class _StreamSanitizer:
         return "" if not tail else tail
 
 
-FINALIZE_SYSTEM = f"""本轮的工具调用次数已用尽，工具现在不可用。
-
-请直接给出最终回答，不要再要求调用任何工具：
-1. 用中文回答，先把**已经拿到的信息**整理清楚（带上来源或时间，便于用户核对）
-2. 明确区分「已查到的」和「没查到的」，没查到的如实说明缺什么
-3. 不要再重复搜索、不要再编造；不确定的地方就说 不确定
-4. 如果任务要求报告或总结，直接输出正文
-5. 绝对不要输出任何工具调用格式或标记（例如 {_DSML_MARK} 这种），那会被当成乱码展示给用户"""
+FINALIZE_SYSTEM = finalize_system(_DSML_MARK)
 
 
 def _summarize_tool_history(messages: list) -> str:
@@ -369,13 +349,6 @@ def _summarize_tool_history(messages: list) -> str:
         elif isinstance(m, AIMessage) and m.content:
             lines.append(f"[过程] {str(m.content)[:200]}")
     return "\n".join(lines)
-
-
-FINALIZE_RETRY_SYSTEM = """直接输出最终回答的正文文字。
-
-要求：
-- 只输出中文正文，不要输出任何调用格式、标记、参数或代码块
-- 信息不足的地方如实说明，不要编造"""
 
 
 async def _finalize_node(state: AgentState):
@@ -459,6 +432,14 @@ async def run_agent(task: str, on_event, user: User | None = None,
     logger.info("agent: start", {"task": task[:60], "user": (user or User()).user_id,
                                  "sessionId": session_id, "memoryChars": len(memory)})
 
+    # route 必须**先给默认值**：下面的 except 要用它写追踪（"这次挂在哪条路上"）。
+    # 如果在 try 里第一次赋值，那么"预检索阶段抛出非预期异常"时就会在 except 里
+    # 读一个还没赋值的名字 —— 例如 embedding 上游 5xx / 401 抛的 APIStatusError，
+    # 既不是 StorageUnavailable 也不是 ValueError，try 里的 except 接不住，于是：
+    #   抛 UnboundLocalError（真实错误被顶掉）→ error 事件发不出去 →
+    #   追踪里也没有 error 步骤 → 用户只看到路由看门狗那句"任务执行中断了"。
+    # 默认值与 classify_task 失败时的回退保持一致（tool）。
+    route = "tool"
     streamed = False
     sanitizer = _StreamSanitizer()
     model_step_seq = 1    # 第几次模型调用（只用于追踪里的编号）
@@ -597,6 +578,9 @@ async def run_agent(task: str, on_event, user: User | None = None,
             await on_event("token", {"token": miss_text})
 
         async for event in agent_graph.astream_events(
+            # ⚠️ 这里出现的每个键都必须在 AgentState 里声明过，否则会被 LangGraph 静默丢掉
+            #    （见 AgentState 里 department_hint / search_query 的说明；
+            #     tests/test_agent_graph.py 有一条用例专门守这个契约）
             {"task": task, "route": route, "messages": [], "steps": 0,
              "sources": pre_sources, "recall": pre_recall,
              "miss_notice": miss_text,

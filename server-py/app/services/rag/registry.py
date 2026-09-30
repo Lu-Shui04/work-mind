@@ -18,11 +18,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from app.services.db import (
-    StorageUnavailable, date_str, require_pool, to_date, to_ts, ts_str,
+from app.core.db import (
+    date_str, require_pool, to_date, to_ts, ts_str,
 )
-from app.schemas.document import ChunkRecord, DocStatus, DocumentRecord, IngestStatus
-from app.utils.logger import logger
+from app.models.schemas import ChunkRecord, DocStatus, DocumentRecord, IngestStatus
 
 # 版本治理的"同一份文档"判定维度：租户 + 标题 + 类型 + 部门
 _GROUP_KEYS = ("document_title", "doc_type", "department")
@@ -36,10 +35,6 @@ _CHUNK_COLUMNS = ("chunk_id", "doc_id", "tenant_id", "order_index", "department"
 # 需要转成 date / timestamptz / jsonb 的列
 _DATE_FIELDS = {"effective_date", "expired_date"}
 _TS_FIELDS = {"created_at", "indexed_at"}
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _enc(field: str, value):

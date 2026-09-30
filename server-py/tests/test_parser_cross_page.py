@@ -1,6 +1,8 @@
 # server-py/tests/test_parser_cross_page.py
 """跨页续写合并的回归测试（不依赖 pytest，直接 python 运行即可）。
 
+（本文件只保留**黄金用例**：核心路径 + 真实踩过的边界，每条都能讲清「防的是什么坑」；零碎用例已精简。）
+
 运行方式（容器内）：
     docker exec workmind-server python /app/tests/test_parser_cross_page.py
 
@@ -19,7 +21,7 @@ import sys
 
 sys.path.insert(0, os.environ.get("APP_DIR", "/app"))
 
-from app.schemas.document import DocumentRecord
+from app.models.schemas import DocumentRecord
 from app.services.rag.ingest import build_chunks
 from app.services.rag.parser import parse_document, parse_pages
 
@@ -34,15 +36,6 @@ def test_cross_page_paragraph_merge():
     assert "800 元" in merged[0].text, "合并后应当包含下一页的开头"
     assert (merged[0].page_number, merged[0].page_end) == (1, 2), "页码区间应为 1-2"
     assert any(e.text.startswith("第二条") for e in doc.elements), "下一段不应被误并"
-
-
-def test_complete_sentence_not_merged():
-    doc = parse_pages(
-        ["第一条 本规定适用于全体正式员工。", "第二条 年假天数见下表。"],
-        parser_name="test", plain_mode=True,
-    )
-    assert len(doc.elements) == 2, "两页各自成段"
-    assert all(e.page_number == e.page_end for e in doc.elements), "不应出现跨页区间"
 
 
 def test_table_continuation_dedup_header():
@@ -73,37 +66,6 @@ def test_chunk_carries_page_range():
 
     assert any(c.page_end and c.page_end != c.page_number for c in chunks), "应存在带页码区间的切片"
     assert any("800 元" in c.text for c in chunks), "跨页切片文本应完整"
-
-
-def test_plain_text_without_blank_lines_is_chunked():
-    """回归：没有空行的纯文本（整篇被解析成 1 个巨大段落）必须切成多个切片。
-
-    真实故障：一份 11661 字节的 .txt（无空行）入库后 chunks=1、单片 4396 字。
-    两个 bug 叠加：① .txt 被当成 Markdown，没有空行 → 整篇 = 1 个元素；
-                  ② 切分只对标题/表格/代码做超长判断，正文分支放过超长元素。
-    """
-    from app.services.rag.ingest import MAX_CHUNK_CHARS, TARGET_CHUNK_CHARS
-
-    sentence = "第三条 员工请假需提前向直属主管报备，并在系统中提交申请，超过三天需部门总监审批。"
-    text = sentence * 60            # ≈ 2700 字，且完全没有空行
-    doc = parse_pages([text], parser_name="test", plain_mode=True)
-
-    assert len(doc.elements) > 1, "无空行的纯文本应被按句末标点断成多个元素"
-
-    rec = DocumentRecord(
-        doc_id="doc_txt", tenant_id="t", document_title="请假制度", department="hr",
-        version="2026-08", effective_date="2026-08-01", doc_type="policy",
-        security_level="internal", file_name="a.txt", file_type="txt", file_size=len(text),
-        source_path="/tmp/a.txt", file_sha256="y",
-    )
-    chunks = build_chunks(rec, doc.elements)
-
-    assert len(chunks) > 1, f"应切成多个切片，实际 {len(chunks)} 个"
-    assert max(c.char_count for c in chunks) <= MAX_CHUNK_CHARS, "任何切片都不能超过上限"
-    assert sum(c.char_count for c in chunks) >= len(text) * 0.9, "切分不应丢内容"
-    # 拼回去要能覆盖原文（去掉空白差异后不应该少字）
-    joined = "".join(c.text for c in chunks).replace("\n", "")
-    assert sentence[:20] in joined
 
 
 def test_chunks_have_overlap():

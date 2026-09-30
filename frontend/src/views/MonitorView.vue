@@ -50,12 +50,6 @@
         <a class="price-src" :href="pricing.source" target="_blank" rel="noopener">
           DeepSeek 官方价目（{{ pricing.checkedAt }} 核对）
         </a>
-        <!-- 没配单价的档位要如实说：否则"知识库费用≈0"会被误读成"知识库免费" -->
-        <span v-if="pricing.unpriced?.length" class="price-warn"
-              :title="'这些档位没有可引用的公开单价，只记 token、费用按 0 计：' + pricing.unpriced.join('、')
-                       + '。可在 .env 里配置对应单价（如 PRICE_RERANK_PER_M）'">
-          ⚠ {{ pricing.unpriced.join('、') }} 未计价
-        </span>
       </div>
     </div>
 
@@ -244,7 +238,6 @@ export default { components: { MetricCard } }
 .price-chip { padding:1px 8px; border-radius:var(--radius-full); background:var(--color-border-light); font-family:var(--font-mono); }
 .price-chip.peak { background:#fef3c7; color:#b45309; }
 .price-detail { font-family:var(--font-mono); }
-.price-warn { color:#b45309; background:#fffbeb; border:1px solid #fde68a; border-radius:var(--radius-full); padding:1px 8px; cursor:help; }
 .price-src { color:var(--color-primary); text-decoration:none; }
 .price-src:hover { text-decoration:underline; }
 .model-cell { font-size:11px; color:var(--color-text-muted); font-family:var(--font-mono); max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

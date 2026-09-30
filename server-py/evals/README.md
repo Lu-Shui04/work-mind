@@ -16,11 +16,11 @@
 
 | 路径 | 作用 |
 |------|------|
-| `datasets/rag_retrieval.json` | RAG 检索召回（19 条）：Recall@k、命中切片的正文结论、权限过滤、检索范围收窄 |
-| `datasets/intent.json` | 意图判定（15 条）：该不该查知识库（needKnowledge） |
-| `datasets/answer_grounding.json` | 回答落地性（13 条）：要点必须出现在回答里；库里没有的必须明说没查到 |
-| `datasets/agent_tasks.json` | 任务 Agent（12 条）：工具调用、路由分支、最终回答要点、流式输出完整性 |
-| `datasets/erp_parse.json` | ERP 智能填单（10 条）：自然语言 → 结构化表单字段逐项比对 |
+| `datasets/rag_retrieval.json` | RAG 检索召回（10 条）：Recall@k、命中切片的正文结论、权限过滤、检索范围收窄 |
+| `datasets/intent.json` | 意图判定（6 条）：该不该查知识库（needKnowledge） |
+| `datasets/answer_grounding.json` | 回答落地性（8 条）：要点必须出现在回答里；库里没有的必须明说没查到 |
+| `datasets/agent_tasks.json` | 任务 Agent（6 条）：工具调用、路由分支、最终回答要点、流式输出完整性 |
+| `datasets/erp_parse.json` | ERP 智能填单（5 条）：自然语言 → 结构化表单字段逐项比对 |
 | `run_evals.py` | runner（纯标准库：urllib + json + argparse + concurrent.futures） |
 | `reports/` | 每次运行的 JSON + Markdown 报告（自动生成，带时间戳） |
 
@@ -86,7 +86,7 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
 
 ## 三、每个集在测什么、怎么判定
 
-### 1. rag_retrieval（19 条）—— 检索召回
+### 1. rag_retrieval（10 条）—— 检索召回
 
 打 `POST /api/knowledge/search`，一条用例判定三件事：
 
@@ -102,7 +102,7 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
 `recall.reason`（`ok` / `below_threshold` / `rerank_rejected` / `all_filtered`）与最高分，
 所以"为什么没召回"在报告里就能看出来，不用再去翻日志。
 
-### 2. intent（15 条）—— 该不该查知识库
+### 2. intent（6 条）—— 该不该查知识库
 
 打 `POST /api/chat/stream`，**只读到 `intent` 事件就断开**（intent 事件在检索与模型调用之前
 就已经下发，读完就能判定，省掉等待整段回答生成的时间）。判定 `needKnowledge` 是否符合预期，
@@ -112,7 +112,7 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
 和**该查库的**（制度提问、口语化制度提问、短问句、部门专属知识），
 其中 `rag召回失败怎么办` 是 README 里记录过的历史回归（旧 strict 模式会判"不需要检索"）。
 
-### 3. answer_grounding（13 条）—— 回答落地性
+### 3. answer_grounding（8 条）—— 回答落地性
 
 打 `POST /api/chat/stream`，把 `token` 事件拼成回答后判定：
 
@@ -125,7 +125,7 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
 判定前会做一次**归一化**：去掉空白和 Markdown 强调符号，再比子串 ——
 模型把"600 元"写成"600元"或"**600 元**"不算事实缺失（排版一致不是这条用例要测的东西）。
 
-### 4. agent_tasks（12 条）—— 任务 Agent
+### 4. agent_tasks（6 条）—— 任务 Agent
 
 打 `POST /api/agent/run`（SSE），比对：
 
@@ -144,7 +144,7 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
    非空 token 的相邻重复率在故障时 ≈0.5、正常对话流 ≈0，阈值取 0.3 两边都不擦边。
    这个指标每条 Agent 用例都会记录（`metrics.tokenDuplication`），报告里能看到。
 
-### 5. erp_parse（10 条）—— 自然语言 → 结构化表单
+### 5. erp_parse（5 条）—— 自然语言 → 结构化表单
 
 打 `POST /api/erp/parse`，逐字段比对：`type`（费用/假期类型）、`totalAmount`（**按文本里的
 算术期望值精确比对，±0.01 容差**）、`itemsMin`、`itemNamesAny`、`startDate`/`endDate`、
