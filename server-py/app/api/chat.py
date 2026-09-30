@@ -46,6 +46,11 @@ class ChatStreamRequest(BaseModel):
     knowledgeVersion: str | None = None
     knowledgeDocType: str | None = None
     includeSuperseded: bool = False
+    # 跳过答案缓存（评测 / "重新生成" 用）。
+    # 为什么必须有这个开关：缓存命中时后端**直接重放答案**，既不发 intent 也不发
+    # sources —— 评测会把重放当成模型输出，于是"答案里标了 [1] 却没有来源"这类
+    # 假失败冒出来，指标静默失真（2026-09-30 实测：一轮评测 5 条全因此误判失败）。
+    noCache: bool = False
 
 
 def chat_model_name() -> str:
@@ -201,10 +206,15 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
             cache_prompt = (body.systemPrompt or base_system) + profile_ctx
             # scope = 权限域 + 检索域（换身份、换知识库模式、换检索范围都不会串味）
             scope = _cache_scope(user, body)
-            cacheable = not _is_followup(message)
+            # noCache（评测/重新生成）：既不读缓存也不写缓存，保证这次一定打真实模型
+            cacheable = (not _is_followup(message)) and not body.noCache
             _lookup_t0 = time.time()
             cached = await cache.get(cache_prompt, message, scope) if cacheable else None
-            if not cacheable:
+            if body.noCache:
+                # 评测/调试专用：缓存命中会直接重放答案（不发 intent / sources），
+                # 评测会把重放当成模型输出 → 指标静默失真，所以这条路必须留痕
+                trace.step("cache", "按请求跳过缓存（noCache：评测/重新生成）", detail={})
+            elif not cacheable:
                 trace.step("cache", "跳过缓存（像追问，答案依赖上文）", detail={"message": message})
             if cached:
                 text = cached["content"]

@@ -334,8 +334,39 @@ def judge_intent(case: dict, actual: dict) -> tuple:
         "needKnowledge": got, "decisionSource": actual.get("decisionSource")}
 
 
-def judge_answer_grounding(case: dict, answer: str) -> tuple:
-    """回答落地性：要点必须出现在回答里；库里没有的必须明说没查到。
+CITE_RE = re.compile(r"\[(\d{1,2})\]")
+
+
+def citation_metrics(answer: str, sources: list | None) -> dict:
+    """引用准确率：回答里标的 [1] [2] 到底对不对得上真实来源。
+
+    判据（**只判"错得明确"的那种**，不做语义比对，避免评测抖）：
+      1. **越界引用**：回答里写了 [5]，但本轮只有 2 条来源 —— 这是硬错误（模型编了编号）；
+      2. **无源引用**：本轮压根没检索到资料（sources 为空），回答里却出现 [n] —— 同样是编的；
+         这两类都直接判用例失败（下面 leaked 一起返回）。
+      3. citationPrecision = 有效引用数 / 总引用数（无引用时：有来源算 0，无来源算 1）；
+      4. citationCoverage  = 有来源时回答是否至少引了一次。
+
+    为什么不判"引用的那一片是不是真的支撑这句话"：模型常做同义改写，
+    关键词比对会大量误判成"引用错误"，那样的指标没人敢信。语义级引用核查留给人工抽查。
+    """
+    sources = sources or []
+    cites = [int(n) for n in CITE_RE.findall(answer or "")]
+    bad = [n for n in cites if not (1 <= n <= len(sources))]
+    if not cites:
+        return {"citationCount": 0, "citationInvalid": [], "citationPrecision": 1.0 if not sources else 0.0,
+                "citationCoverage": 0.0 if sources else 1.0, "sourceCount": len(sources)}
+    return {
+        "citationCount": len(cites),
+        "citationInvalid": bad,
+        "citationPrecision": round((len(cites) - len(bad)) / len(cites), 3),
+        "citationCoverage": 1.0,
+        "sourceCount": len(sources),
+    }
+
+
+def judge_answer_grounding(case: dict, answer: str, sources: list | None = None) -> tuple:
+    """回答落地性：要点必须出现在回答里；库里没有的必须明说没查到；引用必须对得上来源。
 
     must_include      —— 全都要出现（数字、天数、金额这类硬事实）
     must_include_any  —— 每组里至少出现一个（同一件事的多种说法，避免判定过严）
@@ -345,8 +376,17 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
                          防的是"库里没有却编一条公司规定出来"（幻觉回归）。
                          注意：自动模式下后端本来就会把这句话作为第一个 token 推出去，
                          所以这条断言真正的价值是"如果有人把这句删了，评测立刻失败"。
+    sources           —— 本轮检索到的切片（来自 SSE 的 sources 事件），用来算引用准确率。
     """
     answer = answer or ""
+    # sources=None：这次没走检索（缓存重放 / 关闭检索）→ 引用不判（没有来源可信度可言）
+    cite = citation_metrics(answer, sources) if sources is not None else {
+        "citationCount": 0, "citationInvalid": [], "citationPrecision": None,
+        "citationCoverage": None, "sourceCount": None, "citationSkipped": True}
+    # 越界引用 / 无源引用 = 编造出处，与"库里没有却编规定"同级，直接判失败
+    cite_ok = (cite.get("citationSkipped") or (
+        not cite["citationInvalid"]
+        and not (cite["sourceCount"] == 0 and cite["citationCount"] > 0)))
     missing = keyword_missing(case.get("must_include"), answer)
     failed_groups = [g for g in (case.get("must_include_any") or [])
                      if not any(norm(k) in norm(answer) for k in g)]
@@ -356,7 +396,7 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
     # 归一化后再比：排版空格/加粗符号不该影响"这句话有没有出现"
     leaked = [k for k in (case.get("must_not_include") or []) if norm(k) in norm(answer)]
 
-    ok = not missing and not failed_groups and miss_ok and not leaked
+    ok = not missing and not failed_groups and miss_ok and not leaked and cite_ok
     expect_parts = []
     if case.get("must_include"):
         expect_parts.append("必须包含 " + str(case["must_include"]))
@@ -375,7 +415,12 @@ def judge_answer_grounding(case: dict, answer: str) -> tuple:
         actual_txt += "\n❌ 库里没有这条内容，但回答里没有明示未命中（存在编造风险）"
     if leaked:
         actual_txt += "\n❌ 出现了不该出现的内容 " + str(leaked)
-    return ok, "期望：" + "；".join(expect_parts) + "\n" + actual_txt, {"answer_chars": len(answer)}
+    if not cite_ok:
+        actual_txt += ("\n❌ 引用不成立：回答里标了 " + str(cite["citationCount"]) + " 处引用，"
+                       + ("越界编号 " + str(cite["citationInvalid"]) if cite["citationInvalid"]
+                          else "但本轮没有任何来源（sources 为空）"))
+    return ok, "期望：" + "；".join(expect_parts) + "\n" + actual_txt, {
+        "answer_chars": len(answer), **cite}
 
 
 def judge_agent_task(case: dict, actual: dict) -> tuple:
@@ -514,7 +559,7 @@ def run_rag_retrieval(case: dict, base_url: str, identity: dict) -> tuple:
 def run_intent(case: dict, base_url: str, identity: dict) -> tuple:
     """意图集打 /api/chat/stream，只读到 intent 事件就断开（见 post_sse 的 stop_after）。"""
     events = post_sse(base_url, "/api/chat/stream",
-                      {"message": case["message"],
+                      {"message": case["message"], "noCache": True,
                        "sessionId": "eval-intent-" + case["id"] + "-" + RUN_TAG},
                       identity, stop_after="intent")
     intent = next((d for t, d in events if t == "intent"), None)
@@ -531,15 +576,22 @@ def run_answer_grounding(case: dict, base_url: str, identity: dict) -> tuple:
     写进会话历史，再看本轮命中资料时会不会被带偏。
     """
     session_id = "eval-ground-" + case["id"] + "-" + RUN_TAG
+    # noCache：评测必须打真实模型。命中缓存时后端直接重放答案，既不发 intent 也不发
+    # sources，会让"引用准确率"这类指标静默失真（2026-09-30 实测踩到过）。
     for pre in case.get("prelude") or []:
         post_sse(base_url, "/api/chat/stream",
-                 {"message": pre, "sessionId": session_id}, identity)
-    body = {"message": case["question"], "sessionId": session_id}
+                 {"message": pre, "sessionId": session_id, "noCache": True}, identity)
+    body = {"message": case["question"], "sessionId": session_id, "noCache": True}
     if case.get("useKnowledge") is not None:
         body["useKnowledge"] = case["useKnowledge"]
     events = post_sse(base_url, "/api/chat/stream", body, identity)
     answer = sse_tokens(events)
-    ok, detail, metrics = judge_answer_grounding(case, answer)
+    # 引用准确率要用到"本轮到底检索到了哪几条"，所以把 sources 事件一起取出来
+    sources_ev = next((d for t, d in events if t == "sources" and isinstance(d, dict)), None)
+    # None = 这次压根没走检索（缓存重放 / 关闭检索）→ 不判引用，避免假失败；
+    # [] = 走了检索但没命中 → 此时回答里任何 [n] 都是编的出处，必须判失败
+    sources = None if sources_ev is None else (sources_ev.get("sources") or [])
+    ok, detail, metrics = judge_answer_grounding(case, answer, sources)
     metrics["fromCache"] = next((d.get("fromCache") for t, d in events
                                  if t == "done" and isinstance(d, dict)), None)
     return ok, detail, metrics
@@ -726,6 +778,9 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:3000", help="服务地址")
     parser.add_argument("--out", default=None, help="JSON 报告路径（Markdown 报告同名同目录）")
     parser.add_argument("--limit", type=int, default=None, help="每个评测集只跑前 N 条（调试用）")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="检索评测的 TopK（默认按用例里的 k，缺省 6）。"
+                             "简历里那类「Top5 召回率」就用 --top-k 5 跑一次")
     parser.add_argument("--case", action="append", default=None,
                         help="只跑指定用例 id（可重复），例如 --case agent-004 —— 复盘某条失败用例用")
     parser.add_argument("--concurrency", type=int, default=1,
@@ -753,6 +808,7 @@ def main() -> int:
         "baseUrl": base_url,
         "identity": identity,
         "health": health_check(base_url),
+        "topK": getattr(args, "top_k", None),
         "suites": {},
     }
     all_records: list = []
@@ -770,6 +826,10 @@ def main() -> int:
                 continue
         if args.limit:
             cases = cases[:args.limit]
+        # --top-k：把检索评测的 TopK 统一改成指定值（用例自己写了 k 的以用例为准），
+        # 这样"Top5 召回率"这类口径不用改数据集就能跑出来
+        if getattr(args, "top_k", None) and name == "rag_retrieval":
+            cases = [{**c, "k": c.get("k") or args.top_k} for c in cases]
         log("")
         log("▶ " + name + "：" + str(len(cases)) + " 条（" + str(dataset.get("description", "")) + "）")
         started = time.time()

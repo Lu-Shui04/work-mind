@@ -63,12 +63,45 @@ python run_evals.py [--suite rag_retrieval] [--base-url http://127.0.0.1:3000] [
 | `--base-url` | 服务地址，默认 `http://127.0.0.1:3000` |
 | `--out` | JSON 报告路径（Markdown 报告同名同目录）；默认写 `reports/eval-report-<时间戳>.json` |
 | `--limit N` | 每个集只跑前 N 条（调试用） |
+| `--top-k N` | 检索评测的 TopK（默认按用例里的 k，缺省 6）。要出「Top5 召回率」就 `--top-k 5` |
 | `--case ID` | 只跑指定用例 id，可重复；复盘某条失败用例用（例如 `--case agent-004`，用来判断"是稳定失败还是偶发"） |
 | `--concurrency N` | 并发数，默认 1。对话/Agent/ERP 接口都有令牌桶限流（容量 30 / 每秒补 10），并发高了会撞 429 |
 | `--verbose` | 逐条打印通过/失败与"期望 vs 实际" |
 | `--tenant-id / --user-id / --departments / --clearance` | 换评测身份（默认见下） |
 
 退出码：**有失败用例就返回非 0**，方便接进 CI 或"合并前拦一道"。
+
+> ⚠️ **评测请求都带 `noCache: true`**（后端会跳过答案缓存的读与写）。
+> 这不是可选项：缓存命中时后端直接重放答案，既不发 `intent` 事件也不发 `sources` 事件，
+> 评测会把"重放"当成模型输出 —— 2026-09-30 实测，一轮 35 条里有 6 条因此误判失败
+> （5 条"引用越界"假失败 + 1 条"未收到 intent 事件"）。指标要可信，就必须打真实模型。
+
+---
+
+## 二·五、离线指标汇总（七个指标一张表）
+
+```bash
+python run_evals.py --top-k 5        # ① 先出一份 Top5 口径的评测报告
+python offline_metrics.py            # ② 汇总（读最新报告 + 监控看板 + trace + ERP 申请）
+python offline_metrics.py --report reports/eval-report-xxx.json --out reports/offline-metrics.md
+```
+
+`offline_metrics.py` 把评测结果与运行期数据（落库的 `usage_calls` / `trace_runs` / ERP 申请）
+拼成一张表，**每个指标都写明口径与样本量**，方便对外讲、也方便别人复算：
+
+| 指标 | 口径 | 数据来源 |
+|------|------|---------|
+| Top5 召回率 | 每条检索用例 `recall_at_k` 取平均 | 评测报告 |
+| 答案准确率 | 回答要点必须真的出现 + 不得编造公司规定 | 评测报告 |
+| 引用准确率 | 回答里的 `[n]` 与 `sources` 对得上的比例；越界编号 / 本轮无来源却标引用 → 该用例失败 | 评测报告 `citationPrecision` |
+| P95 延迟 | 评测逐条耗时 P95；另给监控看板排除缓存后的 P50/P90/P99 | 评测报告 + `/api/monitor/stats` |
+| Token 成本降幅 | 缓存命中省下的 token ÷（实际消耗 + 省下），近 7 天窗口 | `usage_calls` |
+| 任务成功率 | Agent 任务评测通过率；另给运行期 trace 成功率 | 评测报告 + `/api/trace/stats` |
+| 人工介入率 | 审批链被 `need_info` 打断的申请占比 | `/api/erp/applications` |
+
+引用准确率只判"**错得明确**"的两种：编号越界（写了 [5] 但只有 2 条来源）、
+本轮没有任何来源却标引用（编造出处）。**不**做"引用的那一片是否真的支撑这句话"的语义比对——
+模型常做同义改写，关键词比对会大量误判，那种指标没人敢信；语义级核查留给人工抽查。
 
 ### 评测身份（很关键）
 

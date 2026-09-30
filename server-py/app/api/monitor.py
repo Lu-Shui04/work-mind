@@ -306,7 +306,9 @@ async def _stats_from_db(pool) -> dict:
                    count(*) FILTER (WHERE NOT from_cache)                AS api,
                    COALESCE(sum(input_tokens), 0)                        AS it,
                    COALESCE(sum(output_tokens), 0)                       AS ot,
-                   COALESCE(sum(cost_cny) FILTER (WHERE NOT from_cache), 0) AS cost
+                   COALESCE(sum(cost_cny) FILTER (WHERE NOT from_cache), 0) AS cost,
+                   -- 缓存命中省下的 token：算"成本降幅"要用（7 天窗口比单日稳，见 evals/offline_metrics.py）
+                   COALESCE(sum(saved_tokens) FILTER (WHERE from_cache), 0) AS saved
             FROM usage_calls WHERE ts >= $2
             GROUP BY 1
             """,
@@ -346,6 +348,8 @@ async def _stats_from_db(pool) -> dict:
             "inputT": int(r["it"]) if r else 0,
             "outputT": int(r["ot"]) if r else 0,
             "costCNY": round(float(r["cost"]), 4) if r else 0,
+            # 当天缓存命中省下的 token（"成本降幅"指标的取数口）
+            "savedT": int(r["saved"]) if r else 0,
         })
 
     daily_budget = float(budget) if isinstance(budget, (int, float)) else _daily_budget

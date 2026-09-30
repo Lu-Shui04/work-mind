@@ -1,0 +1,639 @@
+{
+  "generatedAt": "2026-09-30 19:18:24",
+  "baseUrl": "http://127.0.0.1:3100",
+  "identity": {
+    "tenant_id": "tenant-demo",
+    "user_id": "u-tech-01",
+    "departments": "tech",
+    "clearance": "internal"
+  },
+  "health": "status=healthy uptime=66s",
+  "topK": 5,
+  "suites": {
+    "rag_retrieval": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 1367.2,
+      "p95Ms": 1770.8,
+      "maxMs": 1770.8,
+      "description": "RAG 检索召回评测：用真实问题打 POST /api/knowledge/search，判定「期望文档是否出现在 TopK」以及「命中切片的正文里是否真的有这条结论」；另含权限过滤与检索范围收窄用例。统计 Recall@k 与命中率。",
+      "cases": [
+        {
+          "id": "rag-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1770.8,
+          "guard": "年假天数是最常被问的制度问题：防的是意图判对了、检索却召回不到《年假与休假政策》（历史坑：相似度阈值写死 0.5 导致语义相关问题整片召不回）",
+          "detail": "期望：TopK 内需命中 ['年假与休假政策']（≥1 份），正文需含 ['司龄']\n实际：命中 6 条：['年假与休假政策', '年假与休假政策', '年假与休假政策', '年假与休假政策', 'WorkMind 员工手册', '年假与休假政策']；reason=ok bestScore=0.6389",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 6,
+            "bestScore": 0.6389,
+            "reason": "ok",
+            "top_titles": [
+              "年假与休假政策",
+              "年假与休假政策",
+              "年假与休假政策"
+            ]
+          }
+        },
+        {
+          "id": "rag-002",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1264.4,
+          "guard": "防的是只召回文档开头（年假天数表）、把后半段的结转条款漏掉 —— 只比文档标题会漏判，所以必须同时校验切片正文里的关键结论",
+          "detail": "期望：TopK 内需命中 ['年假与休假政策']（≥1 份），正文需含 ['3 月 31 日']\n实际：命中 2 条：['年假与休假政策', 'WorkMind 员工手册']；reason=ok bestScore=0.636",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.636,
+            "reason": "ok",
+            "top_titles": [
+              "年假与休假政策",
+              "WorkMind 员工手册"
+            ]
+          }
+        },
+        {
+          "id": "rag-003",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1325.1,
+          "guard": "差旅住宿标准同时存在 600 / 450 / 350 三档：防的是召回到了文档却取错档位的切片（回答成 450 元）",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['600 元']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.6831",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6831,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-007",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1317.5,
+          "guard": "审批权限是三行表格：防的是表格型内容解析后召回不全，导致答不出 20000 元这一档",
+          "detail": "期望：TopK 内需命中 ['差旅与报销管理制度']（≥1 份），正文需含 ['总经理']\n实际：命中 1 条：['差旅与报销管理制度']；reason=ok bestScore=0.5776",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.5776,
+            "reason": "ok",
+            "top_titles": [
+              "差旅与报销管理制度"
+            ]
+          }
+        },
+        {
+          "id": "rag-009",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1247.7,
+          "guard": "口语化提问（说「发工资」而不是「发薪日」）：防的是检索只认书面词、换个说法就召不回",
+          "detail": "期望：TopK 内需命中 ['WorkMind 员工手册']（≥1 份），正文需含 ['每月 10 日']\n实际：命中 1 条：['WorkMind 员工手册']；reason=ok bestScore=0.4479",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.4479,
+            "reason": "ok",
+            "top_titles": [
+              "WorkMind 员工手册"
+            ]
+          }
+        },
+        {
+          "id": "rag-010",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1321.0,
+          "guard": "部门专属文档（tech / internal）：防的是 tech 身份看不到自己的部门规范 —— 部门过滤写反就会这样",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份），正文需含 ['每周三', '14:00']\n实际：命中 1 条：['前端研发规范']；reason=ok bestScore=0.6205",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 1,
+            "bestScore": 0.6205,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范"
+            ]
+          }
+        },
+        {
+          "id": "rag-012",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1314.3,
+          "guard": "防的是「技术栈约定」这一节被其它章节（代码质量 / 发布流程）挤掉 TopK",
+          "detail": "期望：TopK 内需命中 ['前端研发规范']（≥1 份），正文需含 ['Vue 3']\n实际：命中 2 条：['前端研发规范', '把项目讲得像自己真做过的面试表达']；reason=ok bestScore=0.6296",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 2,
+            "bestScore": 0.6296,
+            "reason": "ok",
+            "top_titles": [
+              "前端研发规范",
+              "把项目讲得像自己真做过的面试表达"
+            ]
+          }
+        },
+        {
+          "id": "rag-013",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1366.9,
+          "guard": "【权限】《考勤与加班管理规定》是 hr / internal，tech 身份不该看到。防的是权限过滤被放宽或写反，把别的部门的文档召回来",
+          "detail": "期望：不要求命中任何文档，且不得出现 ['考勤与加班管理规定']\n实际：命中 0 条：[]；reason=rerank_rejected bestScore=0.4398",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 0,
+            "bestScore": 0.4398,
+            "reason": "rerank_rejected",
+            "top_titles": []
+          }
+        },
+        {
+          "id": "rag-015",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1355.2,
+          "guard": "【权限】财务办法是 finance / internal，tech 身份不可见。防的是「部门过滤只对聊天生效、检索验证接口漏过滤」",
+          "detail": "期望：不要求命中任何文档，且不得出现 ['财务付款与预算管理办法']\n实际：命中 0 条：[]；reason=rerank_rejected bestScore=0.4675",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 0,
+            "bestScore": 0.4675,
+            "reason": "rerank_rejected",
+            "top_titles": []
+          }
+        },
+        {
+          "id": "rag-019",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1388.9,
+          "guard": "public 密级文档对匿名 / 任意身份都可见：防的是权限过滤连 public 也挡住（过度收紧），这两篇面试资料是给访客看的",
+          "detail": "期望：TopK 内需命中 ['AI产品经理面试高频30题']（≥1 份），正文需含 ['面试']\n实际：命中 6 条：['【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲', '【配套手册】AI产品经理面试高频30题精讲']；reason=ok bestScore=0.622",
+          "metrics": {
+            "recall_at_k": 1.0,
+            "hits": 6,
+            "bestScore": 0.622,
+            "reason": "ok",
+            "top_titles": [
+              "【配套手册】AI产品经理面试高频30题精讲",
+              "【配套手册】AI产品经理面试高频30题精讲",
+              "【配套手册】AI产品经理面试高频30题精讲"
+            ]
+          }
+        }
+      ],
+      "wallMs": 13671.7
+    },
+    "intent": {
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 38.1,
+      "p95Ms": 96.9,
+      "maxMs": 96.9,
+      "description": "意图判定评测：POST /api/chat/stream 读 SSE 的 intent 事件，比对 needKnowledge 是否符合预期。防两类回归 ——「该查库却不查」和「闲聊也去查库」。默认策略是召回优先（RAG_INTENT_MODE=recall_first）：只有打招呼/客套话/自我介绍/闲聊创作/翻译润色/写作生成/日期天气/纯算式才跳过检索。",
+      "cases": [
+        {
+          "id": "intent-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 39.0,
+          "guard": "打招呼必须跳过检索：防的是\"召回优先\"被写成\"一律检索\"，寒暄也白花一次 embedding + 检索",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-打招呼，ruleHit=[]，reason=识别为「打招呼」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-打招呼"
+          }
+        },
+        {
+          "id": "intent-004",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 96.9,
+          "guard": "闲聊创作类：防的是知识优先策略把创作请求也拦成\"知识库中未找到相关内容\"",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-闲聊创作，ruleHit=[]，reason=识别为「闲聊创作」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-闲聊创作"
+          }
+        },
+        {
+          "id": "intent-006",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 28.0,
+          "guard": "写作生成类任务要的是\"写\"不是\"查\"：这条是历史踩坑点 —— 被检索分支接住后会因为没命中而拒答，用户拿不到邮件",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-写作/生成类任务，ruleHit=['入职']，reason=识别为「写作/生成类任务」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-写作/生成类任务"
+          }
+        },
+        {
+          "id": "intent-007",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 31.0,
+          "guard": "日期类问题没有可检索内容：防的是\"今天几号\"被知识优先策略拒答（用户要的是日期，不是公司制度）",
+          "detail": "期望：needKnowledge=False，decisionSource 前缀 skip-\n实际：needKnowledge=False，decisionSource=skip-询问日期时间，ruleHit=[]，reason=识别为「询问日期时间」，与知识库无关",
+          "metrics": {
+            "needKnowledge": false,
+            "decisionSource": "skip-询问日期时间"
+          }
+        },
+        {
+          "id": "intent-010",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 14.0,
+          "guard": "最典型的该查库问题：防的是\"该查却不查\"，用户以为助手看了公司制度其实没看",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=['年假']，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）；推断部门：hr",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        },
+        {
+          "id": "intent-012",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 19.5,
+          "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的",
+          "detail": "期望：needKnowledge=True，decisionSource 前缀 recall-first\n实际：needKnowledge=True，decisionSource=recall-first，ruleHit=[]，reason=默认检索知识库（库里有相关内容就带引用回答；没有则明确说明未命中原因）",
+          "metrics": {
+            "needKnowledge": true,
+            "decisionSource": "recall-first"
+          }
+        }
+      ],
+      "wallMs": 228.4
+    },
+    "answer_grounding": {
+      "total": 8,
+      "passed": 8,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 2394.3,
+      "p95Ms": 4908.8,
+      "maxMs": 4908.8,
+      "description": "回答落地性评测：POST /api/chat/stream 取完整回答（token 拼接），校验「必须出现的要点」是否真的出现在回答里；对库里确实没有的内容，必须明示「知识库中没有查到相关内容」。防的是两类回归：答不到点上（要点缺失/口径不对）与编造公司规定（幻觉）。",
+      "cases": [
+        {
+          "id": "ag-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 2782.8,
+          "guard": "年假天数按司龄分三档：防的是只答一档（\"15 天\"）或把口径改成国家法定 5 天，导致员工按错的天数请假",
+          "detail": "期望：必须包含 ['司龄', '5天', '15天']\n回答（263 字）：公司年假按**司龄**（在本公司连续工作的年限）核定，天数不低于国家法定标准 [1]：\n\n| 司龄 | 年假天数 |\n|------|---------|\n| 满 1 年不满 10 年 | 5 天 |\n| 满 10 年不满 20 年 | 10 天 |\n| 满 20 年及以上 | 15 天 |\n\n补充几点：\n- 司龄满 1 年的员工自满 1 年之日起享受年假 [1]。\n- 适用范围为全体正式员工，试用期员工同样适用 [1]。\n- 当年未休完的年假最多可结转 5 天至次年，须在次年 3 月 31 日前休完，逾期作废 [6]。",
+          "metrics": {
+            "answer_chars": 263,
+            "citationCount": 4,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 6,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-002",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 2370.0,
+          "guard": "结转规则有\"最多 5 天\"和\"次年 3 月 31 日前休完\"两个硬条件：缺一个员工就会以为可以无限结转",
+          "detail": "期望：必须包含 ['5天', '3月31日']\n回答（160 字）：当年未休完的年假，最多可结转 **5 天**至次年，且必须在次年 **3 月 31 日前**休完，逾期自动作废 [1]。\n\n超过 5 天的未休年假不结转、不折算工资 [1]。\n\n如果是因公司原因（如项目攻坚、连续出差）导致无法休假，由部门负责人提报、经人力资源总监批准后，可延长至次年 **6 月 30 日** [1]。",
+          "metrics": {
+            "answer_chars": 160,
+            "citationCount": 3,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 3,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-003",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 2581.7,
+          "guard": "住宿标准分城市级别：防的是只报一个数字不说适用城市（在二线城市按 600 报会被财务打回）",
+          "detail": "期望：必须包含 ['600元']；每组至少命中其一 [['一线城市'], ['北京', '上海']]\n回答（318 字）：住宿费按出差目的地城市分级，凭增值税发票据实报销，超出标准部分由个人自理 [1]：\n\n| 城市级别 | 城市范围 | 每晚上限 |\n|---------|---------|---------|\n| 一线城市 | 北京、上海、广州、深圳 | 600 元 |\n| 二线省会城市 | 杭州、成都、武汉、南京、西安等省会城市及计划单列市 | 450 元 |\n| 其他城市 | 上述范围以外的城市 | 350 元 |\n\n补充两点：\n\n- 同性别员工同行出差，原则上应合住标准间以节约费用 [1]。\n- 因展会、旺季等原因房价普遍超过上限的，须在出差申请中事先说明，经部门负责人批准后可按实际发生额报销，但超出",
+          "metrics": {
+            "answer_chars": 318,
+            "citationCount": 3,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 3,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-008",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 2164.7,
+          "guard": "病假工资比例是制度里的数字（10 天以内按 80%）：防的是模型按通用劳动法常识编一个比例出来",
+          "detail": "期望：必须包含 ['80%']\n回答（71 字）：病假期间工资按以下规则计发：凭二级以上医院证明，全年累计 10 天以内按 80% 计发工资，超过部分按当地最低工资标准的 80% 计发。[1]",
+          "metrics": {
+            "answer_chars": 71,
+            "citationCount": 1,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 1,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-011",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1299.5,
+          "guard": "【幻觉】《合同评审与保密管理规范》是 legal/confidential，tech 身份看不到 —— 必须说\"没查到\"，不许拿通用法务常识编一个\"通常 3-10 个工作日\"冒充公司规定",
+          "detail": "期望：必须明示「知识库中没有查到相关内容」\n回答（65 字）：知识库中没有查到相关内容。\n\n你想问什么，可以直接问我 —— 说得具体一点更容易查到，比如「年假有多少天」「出差住宿标准是多少」。",
+          "metrics": {
+            "answer_chars": 65,
+            "citationCount": 0,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 0,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-013",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 425.0,
+          "guard": "【幻觉】公司活动安排不在制度文档里：防的是把\"通常在公司附近酒店\"这种猜测说成公司安排",
+          "detail": "期望：必须明示「知识库中没有查到相关内容」\n回答（65 字）：知识库中没有查到相关内容。\n\n你想问什么，可以直接问我 —— 说得具体一点更容易查到，比如「年假有多少天」「出差住宿标准是多少」。",
+          "metrics": {
+            "answer_chars": 65,
+            "citationCount": 0,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 0,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-014",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 4908.8,
+          "guard": "【多轮】同一会话里上一句恰好没命中（prelude 那句会被重排全判成答不了，助手刚说完\"知识库中没有查到相关内容\"），紧接着这一句检索到了 2 条《年假与休假政策》切片 —— 防的是模型把**上一轮的没查到结论**复述成本轮答案（2026-09-27 实测事故：资料明明在上下文里，回答却是\"知识库中没有查到年假制度的相关内容\"）。断言直接对着这条：回答里**不允许**出现\"未找到/没有查到\"，且必须给出制度里的具体条款（3 个工作日 + 司龄/年假天数/审批 任一）。（原本还要求\"司龄\"和\"审批\"两组都命中，实测会误伤——只答申请流程、没答天数的那种回答同样是有依据的正确回答，属于断言过严导致的抖动，已收敛。）",
+          "detail": "期望：必须包含 ['3个工作日']；每组至少命中其一 [['司龄', '年假天数', '审批']]；不允许出现 ['未找到', '没有查到']\n回答（487 字）：好的，请年假按下面几步走：\n\n**1. 确认天数**（按司龄核定）[2]\n\n| 司龄 | 年假天数 |\n|------|---------|\n| 满 1 年不满 10 年 | 5 天 |\n| 满 10 年不满 20 年 | 10 天 |\n| 满 20 年及以上 | 15 天 |\n\n**2. 提前提交申请**（在 HR 系统）[1]\n- 一般情况：提前 **3 个工作日**提交\n- 连续休假 **5 个工作日及以上**：提前 **10 个工作日**提交，以便工作交接\n\n**3. 确认审批人**[1]\n\n| 单次连续休假天数 | 审批人 |\n|-----------------|--------|",
+          "metrics": {
+            "answer_chars": 487,
+            "citationCount": 4,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 2,
+            "fromCache": false
+          }
+        },
+        {
+          "id": "ag-015",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 2621.8,
+          "guard": "【照常检索，但不许乱下结论】这类问题照常走向量检索（命中几条就是几条），**不能把「本轮命中几条」说成「库里只有几篇」** —— 2026-09-27 实测：只命中 1 条就答\"本轮检索到的资料只有 1 篇\"，用户读成「库里只有 1 篇」（同一身份可见 6 篇）。也不能顺着用户画像对**没问的话题**（年假）下\"知识库中未找到\"的结论。",
+          "detail": "期望：不允许出现 ['只有1篇', '只有1条', '未找到与年假']\n回答（234 字）：我只能看到本轮检索到的这几段资料，无法给出知识库的完整内容列表——完整列表请在「知识库」页面查看。\n\n本轮检索到的内容片段来自：\n\n- 《把项目讲得像自己真做过的面试表达》第1页（部门：general，版本：2026-09），内容涉及订单类问答的真实数据与中间步骤透明化、以及 RAG 方案的演进（文档切分、Top-K 检索、防幻觉 Prompt 约束等）[1]\n\n如果你想知道某个具体主题（比如某类制度、某个流程、某份文档），把问题问得更具体一些，我可以再帮你检索。",
+          "metrics": {
+            "answer_chars": 234,
+            "citationCount": 1,
+            "citationInvalid": [],
+            "citationPrecision": 1.0,
+            "citationCoverage": 1.0,
+            "sourceCount": 1,
+            "fromCache": false
+          }
+        }
+      ],
+      "wallMs": 19154.4
+    },
+    "agent_tasks": {
+      "total": 6,
+      "passed": 6,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 7441.6,
+      "p95Ms": 14145.7,
+      "maxMs": 14145.7,
+      "description": "任务 Agent 评测：POST /api/agent/run 读 SSE，比对「实际调用了哪些工具」「路由到哪条分支」「最终回答是否包含要点」。注意最终回答只取 answer_reset 之后的 token（过程说明不算），避免\"过程里提过\"被误判成\"回答里有\"。",
+      "cases": [
+        {
+          "id": "agent-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3034.0,
+          "guard": "README 记录的坑：纯算式任务如果被塞进知识分支，会检索未命中然后直接结束，工具根本没机会执行 —— 这条防的就是\"工具被知识分支吃掉\"",
+          "detail": "期望：需调用 ['calculate']，回答需含 ['2140']\n实际调用 ['calculate']，route=tool，步数=1，回答（136 字）：**1500 + 800 × 0.8 = 2140**\n\n计算过程（按先乘除后加减的顺序）：\n- 800 × 0.8 = 640\n- 1500 + 640 = **2140**\n\n说明：知识库中没有查到与本问题相关的内容，以上为通用数学计算结果，不涉及任何公司制度或规定。",
+          "metrics": {
+            "tools": [
+              "calculate"
+            ],
+            "route": "tool",
+            "steps": 1,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-004",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 14145.7,
+          "guard": "多工具协作任务（查文档 + 计算 + 通知）：防的是任务只做一半（只答政策不计算、或算完不发通知）",
+          "detail": "期望：需调用 ['calculate', 'send_notify']，回答需含 ['9天']，回答需含其一 ['年假', '司龄']\n实际调用 ['read_doc', 'get_date', 'calculate', 'write_report', 'send_notify']，route=tool，步数=5，回答（682 字）：已完成。以下是结果汇总：\n\n## 一、公司年假政策（依据《年假与休假政策》HR-2026-007，版本 2026-09）\n\n**年假天数按司龄核定：**\n| 司龄 | 年假天数 |\n|------|---------|\n| 满 1 年不满 10 年 | 5 天 |\n| 满 10 年不满 20 年 | 10 天 |\n| 满 20 年及以上 | 15 天 |\n\n**其他关键规则：**\n- 以**自然年**为周期，每年 1 月 1 日重置\n- 申请须提前 3 个工作日；连续休 5 个工作日及以上须提前 10 个工作日\n- 未休年假最多**结转 5 天**至次年，须在次年 3 月 31 日前休完，逾期",
+          "metrics": {
+            "tools": [
+              "read_doc",
+              "get_date",
+              "calculate",
+              "write_report",
+              "send_notify"
+            ],
+            "route": "tool",
+            "steps": 5,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-005",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 8949.0,
+          "guard": "知识 + 计算的组合题（一线城市 600 元/晚 × 4 晚 = 2400）：防的是只复述标准表、不给用户算结果；同时防「明明检索命中却自称没查到」—— 走工具分支时后端会把 miss_notice 误置位，回答以「知识库中没有查到相关内容」开头再自我纠正（用户看到自相矛盾的第一句）",
+          "detail": "期望：需调用 []，回答需含 ['2400']，回答不得出现 ['知识库中没有查到相关内容', '知识库中未找到相关内容']\n实际调用 ['read_doc', 'calculate']，route=tool，步数=2，回答（720 字）：## 结论：北京出差 4 天，酒店住宿费最多可报销 **2400 元**\n\n### 依据（《差旅与报销管理制度》2026-09 版，第二章 住宿费标准）\n\n| 城市级别 | 城市范围 | 每晚上限 |\n|---|---|---|\n| **一线城市** | **北京**、上海、广州、深圳 | **600 元/晚** |\n| 二线省会城市 | 杭州、成都、武汉、南京、西安等 | 450 元/晚 |\n| 其他城市 | 上述以外 | 350 元/晚 |\n\n北京属一线城市，每晚上限 600 元。\n\n### 计算\n- 600 元/晚 × 4 晚 = **2400 元**\n\n### 几点需要注意\n1. **",
+          "metrics": {
+            "tools": [
+              "read_doc",
+              "calculate"
+            ],
+            "route": "tool",
+            "steps": 2,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-006",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 11373.5,
+          "guard": "需要外部信息的任务必须真联网并产出报告：防的是模型凭记忆编版本号（README 记录过\"没配 key 却假装搜过\"）",
+          "detail": "期望：需调用 ['web_search', 'write_report']，回答需含 ['Vue']\n实际调用 ['web_search', 'web_search', 'write_report']，route=tool，步数=3，回答（749 字）：**知识库中没有查到与本问题相关的内容**（本次未检索公司内部知识库，以下均为公开网络检索结果，非公司规定）。\n\n## Vue 3 最新稳定版本调研结论\n\n**当前稳定版：Vue 3.5 系列**（多篇 2025 年技术资料均以 3.5+ 作为生产可用基线）\n\n**关键信息：**\n\n| 项目 | 情况 |\n|------|------|\n| 稳定版 | Vue 3.5+ |\n| 下一版本 | Vue 3.6，仍处 **beta 阶段**（已到 v3.6.0-beta.17） |\n| Vue 2 | 2023-12-31 已停止维护，官方建议升级 |\n\n**要点：**\n1. **3.5 系列为生",
+          "metrics": {
+            "tools": [
+              "web_search",
+              "web_search",
+              "write_report"
+            ],
+            "route": "tool",
+            "steps": 3,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-009",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3646.5,
+          "guard": "【幻觉】知识库里没有年会信息：没查到就必须说没查到，不许编一份年会安排出来（这类\"合理编造\"最伤信任）",
+          "detail": "期望：需调用 []，route=chat，回答需含其一 ['知识库中没有查到相关内容', '知识库中未找到相关内容', '没有查到']\n实际调用 []，route=chat，步数=0，回答（328 字）：（知识库中没有查到相关内容，以下内容来自通用知识，不代表公司口径。）\n\n知识库中没有查到相关内容。\n\n关于公司年会安排和预算，我无法提供贵公司的具体信息，因为这属于公司内部安排，需要以官方通知为准。以下是通用建议：\n\n1. **获取渠道**：可向行政部、人力资源部或你的直属上级咨询，也可留意公司内部公告、OA系统或企业微信群通知。\n2. **常见内容**：年会通知一般包含时间、地点、形式（线下/线上）、参与范围、着装要求、节目征集等。\n3. **预算信息**：年会预算通常由行政部门或财务部门掌握，普通员工一般无法直接查询，如需了解可走内部申请流程。\n\n如果你能提供公司名称或相关内部系统入口，我",
+          "metrics": {
+            "tools": [],
+            "route": "chat",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        },
+        {
+          "id": "agent-010",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 3501.2,
+          "guard": "【幻觉 + 权限】《考勤与加班管理规定》是 hr 部门文档，tech 身份看不到 —— 必须如实说没查到，不能凭常识答\"每月 3 次\"",
+          "detail": "期望：需调用 []，回答需含其一 ['知识库中没有查到相关内容', '知识库中未找到相关内容', '没有查到']\n实际调用 []，route=chat，步数=0，回答（191 字）：（知识库中没有查到相关内容，以下内容来自通用知识，不代表公司口径。）\n\n知识库中没有查到相关内容。\n\n关于补卡次数，这属于各公司自行制定的考勤管理规定，没有统一标准，我无法提供贵公司的具体数字。建议你通过以下途径确认：\n\n- 查阅员工手册或考勤管理制度\n- 咨询HR部门或直属主管\n- 查看公司OA/考勤系统内的补卡申请说明\n\n如果你能提供公司相关制度文件，我可以帮你解读具体条款。",
+          "metrics": {
+            "tools": [],
+            "route": "chat",
+            "steps": 0,
+            "tokenDuplication": 0.0,
+            "maxStepsReached": false
+          }
+        }
+      ],
+      "wallMs": 44649.9
+    },
+    "erp_parse": {
+      "total": 5,
+      "passed": 5,
+      "failed": 0,
+      "infraFailed": 0,
+      "passRate": 1.0,
+      "avgMs": 1245.0,
+      "p95Ms": 1761.7,
+      "maxMs": 1761.7,
+      "description": "ERP 智能填单评测：POST /api/erp/parse 把自然语言解析成结构化表单，逐字段比对类型 / 总金额 / 日期 / 自然日与工作日 / 明细条数 / 合规告警。金额一律用文本里的算术期望值精确比对（±0.01），只用绝对日期出题，避免评测随时间漂移。",
+      "cases": [
+        {
+          "id": "erp-001",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1761.7,
+          "guard": "四项明细求和（1740+1200+450+260）：防的是漏项或者把\"每天\"乘以错误天数（餐费按 3 天算）",
+          "detail": "期望：{\"type\": \"travel\", \"totalAmount\": 3650, \"itemsMin\": 4, \"itemNamesAny\": [\"住宿\"]}\n实际：{\"type\": \"travel\", \"totalAmount\": 3650.0, \"reason\": \"上海出差3天费用报销\", \"dept\": null, \"warnings\": [\"住宿费合计1740元（580元/晚×3晚），单笔未超3000元，但请确认是否符合部门住宿标准\", \"出差具体日期未明确，暂按上周（2026-09-21至09-27）区间填写，请核实实际发生日期\", \"报销事由较简略，建议补充出差事由（如客户拜访、会议名称等）\"]}；items=[{\"name\": \"住宿费\", \"amount\": 1740.0}, {\"name\": \"机票往返\", \"amount\": 1200.0}, {\"name\": \"餐费\", \"amount\": 450.0}, {\"name\": \"打车费\", \"amount\": 260.0}]",
+          "metrics": {
+            "type": "travel",
+            "totalAmount": 3650.0
+          }
+        },
+        {
+          "id": "erp-003",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1023.9,
+          "guard": "餐饮单笔限额 500 元由服务端 check_compliance 判定：防的是\"模型解析对了但合规告警没接上\"，用户提交时看不到超限提示",
+          "detail": "期望：{\"type\": \"meal\", \"totalAmount\": 860, \"warningsAny\": [\"500\"]}\n实际：{\"type\": \"meal\", \"totalAmount\": 860.0, \"reason\": \"团队聚餐餐饮费\", \"dept\": null, \"warnings\": [\"报销事由较简略，建议补充聚餐事由（如项目庆功、团队建设等）以便审批\", \"\\\"团队聚餐\\\" ¥860.0 超过单笔限额 ¥500，需要额外说明\"]}；items=[{\"name\": \"团队聚餐\", \"amount\": 860.0}]",
+          "metrics": {
+            "type": "meal",
+            "totalAmount": 860.0
+          }
+        },
+        {
+          "id": "erp-005",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1383.0,
+          "guard": "住宿 900 元/晚超过公司 800 元标准：防的是超标提醒丢失（员工以为能全额报销，到财务被退回）",
+          "detail": "期望：{\"type\": \"travel\", \"totalAmount\": 5380, \"warningsAny\": [\"住宿费用偏高\"]}\n实际：{\"type\": \"travel\", \"totalAmount\": 5380.0, \"reason\": \"深圳出差4天\", \"dept\": null, \"warnings\": [\"住宿费单笔3600元（900元/晚×4晚）超过3000元，需确认是否符合住宿标准或提供说明\", \"未提供具体出差日期，请补充起止日期\", \"未提供报销部门，请补充\", \"住宿费用偏高，每晚标准为 ¥800\"]}；items=[{\"name\": \"住宿费\", \"amount\": 3600.0}, {\"name\": \"机票（往返）\", \"amount\": 1500.0}, {\"name\": \"市内交通\", \"amount\": 280.0}]",
+          "metrics": {
+            "type": "travel",
+            "totalAmount": 5380.0
+          }
+        },
+        {
+          "id": "erp-007",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 922.2,
+          "guard": "跨周末的假期：自然日 4 天、工作日只有 2 天（3/13 周五、3/16 周一）。防的是 workdays 直接等于 days，扣错工资",
+          "detail": "期望：{\"type\": \"personal\", \"startDate\": \"2026-03-13\", \"endDate\": \"2026-03-16\", \"days\": 4, \"workdays\": 2}\n实际：{\"type\": \"personal\", \"startDate\": \"2026-03-13\", \"endDate\": \"2026-03-16\", \"days\": 4.0, \"workdays\": 2, \"reason\": \"去外地办事\", \"emergencyContact\": null, \"warnings\": []}；items=[]",
+          "metrics": {
+            "type": "personal",
+            "totalAmount": null
+          }
+        },
+        {
+          "id": "erp-008",
+          "passed": true,
+          "infra": false,
+          "elapsedMs": 1134.3,
+          "guard": "婚假 10 天含法定 3 天，且要提示证明材料：防的是类型判成\"年假\"，用错假期额度",
+          "detail": "期望：{\"type\": \"marriage\", \"startDate\": \"2026-05-01\", \"endDate\": \"2026-05-10\", \"days\": 10, \"workdays\": 6, \"warningsAny\": [\"证明\", \"审批\"]}\n实际：{\"type\": \"marriage\", \"startDate\": \"2026-05-01\", \"endDate\": \"2026-05-10\", \"days\": 10.0, \"workdays\": 6, \"reason\": \"领证结婚\", \"emergencyContact\": null, \"warnings\": [\"请假超过3个工作日，需要主管和HR双重审批\", \"婚假需提供相关证明材料（如结婚证）\"]}；items=[]",
+          "metrics": {
+            "type": "marriage",
+            "totalAmount": null
+          }
+        }
+      ],
+      "wallMs": 6225.1
+    }
+  },
+  "summary": {
+    "total": 35,
+    "passed": 35,
+    "failed": 0,
+    "infraFailed": 0,
+    "passRate": 1.0,
+    "avgMs": 2398.0,
+    "p95Ms": 11373.5,
+    "maxMs": 14145.7
+  }
+}
