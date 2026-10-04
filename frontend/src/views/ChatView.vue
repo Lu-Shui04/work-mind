@@ -54,13 +54,6 @@
       <ChatInput />
     </div>
 
-    <!-- 右：用户画像（可折叠） -->
-    <ProfilePanel v-if="showProfile" />
-
-    <!-- 折叠/展开画像按钮 -->
-    <button class="profile-toggle" @click="showProfile = !showProfile" :title="showProfile ? '收起画像' : '展开画像'">
-      {{ showProfile ? '›' : '‹' }}
-    </button>
   </div>
 </template>
 
@@ -71,12 +64,10 @@ import SessionSidebar from '@/components/chat/SessionSidebar.vue'
 import ScopeSelector from '@/components/chat/ScopeSelector.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
-import ProfilePanel from '@/components/chat/ProfilePanel.vue'
 
 const chatStore  = useChatStore()
 const listEl     = ref(null)
 const bottomEl   = ref(null)
-const showProfile = ref(true)
 
 const roleIcon = 'ChatDotRound'
 
@@ -129,7 +120,7 @@ watch(
 onMounted(() => {
   chatStore.init()
   // 角色预设已合并成一个助手，不再需要拉取角色列表
-  chatStore.loadProfile()
+  // （用户画像面板已下线：见 stores/chat.js 顶部说明；画像本身仍在后端记录，用于个性化回答）
 })
 </script>
 
@@ -211,27 +202,4 @@ onMounted(() => {
   color: var(--color-primary);
   background: var(--color-primary-bg);
 }
-
-/* 画像折叠按钮 */
-.profile-toggle {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 18px;
-  height: 48px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-right: none;
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  color: var(--color-text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  transition: all var(--transition);
-}
-.profile-toggle:hover { color: var(--color-primary); }
 </style>

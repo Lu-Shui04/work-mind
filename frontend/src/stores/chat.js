@@ -108,34 +108,17 @@ export const useChatStore = defineStore('chat', () => {
     return d
   })
 
-  // ── 用户画像 ──────────────────────────────────────────────────
-  // ⚠️ userId 必须**跟着当前身份走**：以前写死成 'user-demo' 且从不更新，
-  //    而后端是按请求体里的 identity.current.userId 存画像的 —— 于是画像面板
-  //    永远在查 user-demo 这个不存在的用户，界面上永远是空的，用户以为"没记住"
-  //    （2026-10-04 实测：库里 u-tech-01 已有 {"name":"小米"}，面板却查 user-demo 拿到 {}）。
-  const profile = ref({})
-  const userId  = computed(() => identity.current.userId || 'user-demo')
-
-  async function loadProfile() {
-    try {
-      const data = await http.get(`/chat/profile/${userId.value}`)
-      profile.value = data || {}
-    } catch {}
-  }
-
-  // 切换身份后要立刻换一份画像（否则面板显示的仍是上一个身份的画像）
-  watch(() => identity.current.userId, () => { loadProfile() })
-
-  // 清除画像：必须落库。只清本地的话刷新一下又全回来（用户以为"删不掉"）。
-  async function clearProfile() {
-    try {
-      await http.delete(`/chat/profile/${userId.value}`)
-      profile.value = {}
-      appStore.toast.success('已清除该用户的画像记忆')
-    } catch (err) {
-      appStore.toast.error(err?.message || '清除失败')
-    }
-  }
+  // ── 用户画像：前端面板已下线（2026-10-04）─────────────────────
+  // 右侧「用户画像」面板连着的数据链路一直是坏的：面板里的条目是内联子组件
+  // ProfileItem 渲染的，而它在生产产物里没被注册成功 —— Vue 解析不到组件就什么都
+  // 不渲染，于是有画像时整个面板一片空白（没画像时反倒显示"多聊几句…"的提示，
+  // 所以这个 bug 一直没被发现）。
+  //
+  // 按用户要求直接去掉这个界面。**后端的画像能力保留**：每轮结束仍会异步抽取并
+  // 写入 user_profiles，画像也会注入 system prompt（所以「我叫小米」之后它会记得你
+  // 叫小米），只是不再有那块可视化面板。
+  // 想恢复这块 UI：git 里有 ProfilePanel.vue 的原文件（commit 1641d7d 之前），
+  // 修法是把 ProfileItem 直接写进 <script setup>（或用 v-for 展开），别再用双 script 注册。
 
   // ── 发送消息（核心）──────────────────────────────────────────
   const loading = ref(false)
@@ -213,11 +196,7 @@ export const useChatStore = defineStore('chat', () => {
           // 以前前端在这里自己累加 todaySpend，那份数字只活在当前浏览器标签里，
           // 一刷新就归零，和看板上的数字永远对不上。这里只负责稍后刷新看板。
           setTimeout(() => monitorStore.refresh(), 600)
-          // 刷新画像：服务端是**后台任务**在抽取画像（一次模型调用，实测 0.7~2 秒），
-          // 在 done 的瞬间拉到的是旧值 —— 而且抽取耗时会波动，单次延时不可靠，
-          // 所以拉三次（1.2s / 3s / 6s），每次都是几百字节的 GET，代价可忽略。
-          // （2026-10-04 实测：用户说完"我叫小米"，面板一直等到手动点刷新才出现姓名）
-          ;[1200, 3000, 6000].forEach((ms) => setTimeout(loadProfile, ms))
+          // 画像面板已下线，不再轮询 /chat/profile（后端照常抽取与注入画像）
         },
         onError: (err) => {
           aiMsg.streaming = false
@@ -281,10 +260,8 @@ export const useChatStore = defineStore('chat', () => {
   return {
     sessions, currentId, currentSession, messages,
     knowledgeMode, scope, scopeId, setScope, resolvedDepartment,
-    profile, userId,
     loading,
     init, newSession, switchSession, deleteSession,
-    loadProfile, clearProfile,
     sendMessage, regenerate, copyMessage, clearCurrentSession, clearAllSessions,
   }
 })
