@@ -109,14 +109,32 @@ export const useChatStore = defineStore('chat', () => {
   })
 
   // ── 用户画像 ──────────────────────────────────────────────────
+  // ⚠️ userId 必须**跟着当前身份走**：以前写死成 'user-demo' 且从不更新，
+  //    而后端是按请求体里的 identity.current.userId 存画像的 —— 于是画像面板
+  //    永远在查 user-demo 这个不存在的用户，界面上永远是空的，用户以为"没记住"
+  //    （2026-10-04 实测：库里 u-tech-01 已有 {"name":"小米"}，面板却查 user-demo 拿到 {}）。
   const profile = ref({})
-  const userId  = ref('user-demo')
+  const userId  = computed(() => identity.current.userId || 'user-demo')
 
   async function loadProfile() {
     try {
       const data = await http.get(`/chat/profile/${userId.value}`)
-      profile.value = data
+      profile.value = data || {}
     } catch {}
+  }
+
+  // 切换身份后要立刻换一份画像（否则面板显示的仍是上一个身份的画像）
+  watch(() => identity.current.userId, () => { loadProfile() })
+
+  // 清除画像：必须落库。只清本地的话刷新一下又全回来（用户以为"删不掉"）。
+  async function clearProfile() {
+    try {
+      await http.delete(`/chat/profile/${userId.value}`)
+      profile.value = {}
+      appStore.toast.success('已清除该用户的画像记忆')
+    } catch (err) {
+      appStore.toast.error(err?.message || '清除失败')
+    }
   }
 
   // ── 发送消息（核心）──────────────────────────────────────────
@@ -195,8 +213,11 @@ export const useChatStore = defineStore('chat', () => {
           // 以前前端在这里自己累加 todaySpend，那份数字只活在当前浏览器标签里，
           // 一刷新就归零，和看板上的数字永远对不上。这里只负责稍后刷新看板。
           setTimeout(() => monitorStore.refresh(), 600)
-          // 刷新画像（后台可能更新了）
-          loadProfile()
+          // 刷新画像：服务端是**后台任务**在抽取画像（一次模型调用，约 1~2 秒），
+          // 在 done 的瞬间拉到的还是旧值 —— 必须延迟再拉
+          // （2026-10-04 实测：用户说完"我叫小米"，面板直到手动点刷新才出现姓名）
+          setTimeout(loadProfile, 1500)
+          setTimeout(loadProfile, 4000)
         },
         onError: (err) => {
           aiMsg.streaming = false
@@ -263,7 +284,7 @@ export const useChatStore = defineStore('chat', () => {
     profile, userId,
     loading,
     init, newSession, switchSession, deleteSession,
-    loadProfile,
+    loadProfile, clearProfile,
     sendMessage, regenerate, copyMessage, clearCurrentSession, clearAllSessions,
   }
 })

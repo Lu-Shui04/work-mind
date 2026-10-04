@@ -249,7 +249,10 @@ def schedule_summary(session_id: str, tenant_id: str | None = None) -> bool:
     except RuntimeError:
         # 没有事件循环（同步调用/单元测试）：跳过摘要，绝不能因此把对话搞崩
         return False
-    loop.create_task(summarize_session(session_id, tenant_id))
+    # 必须走 spawn（强引用）：裸 create_task 只被事件循环弱引用，
+    # 任务可能在跑完前被 GC，摘要就"有时做有时不做"且没有任何报错
+    from app.infra.tasks import spawn
+    spawn(summarize_session(session_id, tenant_id), name="memory-summarize")
     return True
 
 
@@ -389,6 +392,28 @@ async def _save_profile(user_id: str, profile: dict, tenant_id: str | None = Non
     _mem_profiles[_mem_key(tenant, user_id)] = profile
 
 
+async def clear_profile(user_id: str, tenant_id: str | None = None) -> bool:
+    """清空某个用户的画像（前端「清除记忆」按钮）。返回是否真的清到了东西。
+
+    为什么必须落库：这个按钮以前只把前端 store 置空 —— 界面上画像没了，
+    刷新一下又全回来（库里那条记录还在），用户以为"删不掉"。
+    """
+    tenant = tenant_id or DEFAULT_TENANT
+    pool = get_pool()
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM user_profiles WHERE tenant_id = $1 AND user_id = $2",
+                    tenant, user_id,
+                )
+            memory_copy = _mem_profiles.pop(_mem_key(tenant, user_id), None)
+            return result.split()[-1] != "0" or memory_copy is not None
+        except Exception as err:  # noqa: BLE001
+            _note_degraded(str(err))
+    return _mem_profiles.pop(_mem_key(tenant, user_id), None) is not None
+
+
 def profile_to_context(profile: dict) -> str:
     if not profile:
         return ""
@@ -463,6 +488,7 @@ async def extract_and_update_profile(user_id: str, user_msg: str, ai_reply: str,
                 [*current.get("primaryStack", []), *result.primaryStack]))
 
         await _save_profile(user_id, updated, tenant_id)
-    except Exception:
-        # 画像提取失败不影响主流程，静默处理
-        pass
+    except Exception as err:  # noqa: BLE001
+        # 画像提取失败不影响主流程，但**不能静默** —— 用户看到的是"AI 没记住我"，
+        # 而日志里空空如也，排查时只能靠猜（2026-10-04 实测教训）
+        logger.warn("memory: 画像提取失败", {"userId": user_id, "error": str(err)[:200]})

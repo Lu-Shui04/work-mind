@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field
 from app.core.middleware import rate_limiter, security_check
 from app.prompts.chat import ASSISTANT_SYSTEM
 from app.infra.cache import cache
+from app.infra.tasks import spawn
 from app.services.chat.memory import (
-    append_turn, clear_all, clear_history, extract_and_update_profile, get_profile,
-    list_sessions, memory_messages, profile_to_context,
+    append_turn, clear_all, clear_history, clear_profile, extract_and_update_profile,
+    get_profile, list_sessions, memory_messages, profile_to_context,
 )
 from app.core.db import StorageUnavailable
 from app.core.identity import User, current_user
@@ -38,7 +39,11 @@ class ChatStreamRequest(BaseModel):
     sessionId: str | None = "default"
     systemPrompt: str | None = Field(default=None, max_length=2000)
     role: str | None = "default"
-    userId: str | None = "anonymous"
+    # ⚠️ 缺省必须是 None，不能写 "anonymous"：下面 user_id = body.userId or user.user_id
+    #    的本意是"没传就用请求头里的身份"，但默认值一填，or 就永远短路到 "anonymous" ——
+    #    画像与会话归属全落到 anonymous 名下（2026-10-04 实测：不带 userId 的请求
+    #    把 {"name":"小米"} 存到了 anonymous，而界面按 u-tech-01 查，用户以为没记住）。
+    userId: str | None = None
     # 知识库检索：None=自动判断（默认），True=强制检索，False=关闭
     useKnowledge: bool | None = None
     # 检索范围收窄（部门/版本/类型），为空时按自动判断结果与用户权限
@@ -429,8 +434,10 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 await cache.set(cache_prompt, message, full_reply,
                                 input_tokens + output_tokens, scope)
 
-            asyncio.create_task(
-                _safe_extract_profile(user_id, message, full_reply, user.tenant_id))
+            # 走 spawn（强引用）：裸 create_task 只被事件循环弱引用，画像抽取可能
+            # 在跑完前被 GC —— 表现是"画像时有时无"且日志干净（2026-10-04 实测）
+            spawn(_safe_extract_profile(user_id, message, full_reply, user.tenant_id),
+                  name="profile-extract")
 
             # 用量统计：落库后才能在看板上看到真实数字（此前 record_api_call 从未被调用）
             from app.api.monitor import record_api_call
@@ -476,6 +483,7 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
 
 
 async def _safe_extract_profile(user_id: str, message: str, reply: str, tenant_id: str):
+    """画像抽取的兜底包装：绝不影响主流程，但失败要留日志（见 infra/tasks.spawn）。"""
     try:
         await extract_and_update_profile(user_id, message, reply, tenant_id)
     except Exception:
@@ -506,6 +514,19 @@ async def clear_sessions(user: User = Depends(current_user)):
 @router.get("/profile/{user_id}")
 async def profile(user_id: str, user: User = Depends(current_user)):
     return await get_profile(user_id, user.tenant_id)
+
+
+@router.delete("/profile/{user_id}")
+async def clear_user_profile(user_id: str, user: User = Depends(current_user)):
+    """清除该用户的跨会话画像（前端「清除记忆」按钮）。
+
+    以前前端只把本地 store 置空，刷新一下画像又全回来（库里那条还在）——
+    看起来就是"记性能记住、却删不掉"。
+    """
+    cleared = await clear_profile(user_id, user.tenant_id)
+    logger.info("chat: profile cleared", {"userId": user_id, "tenant": user.tenant_id,
+                                          "cleared": cleared})
+    return {"success": True, "cleared": cleared}
 
 
 @router.get("/roles")

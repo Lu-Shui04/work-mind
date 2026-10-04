@@ -66,8 +66,9 @@ const isEmpty = computed(() => {
          !profile.prefersShort && !profile.prefersCode
 })
 
+// 走 store 的 action：必须调后端 DELETE 落库，只清本地的话刷新一下画像又全回来
 function clearProfile() {
-  chatStore.profile = {}
+  chatStore.clearProfile()
 }
 </script>
 

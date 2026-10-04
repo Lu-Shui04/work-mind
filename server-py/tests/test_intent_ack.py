@@ -59,6 +59,30 @@ def test_ack_with_question_still_retrieves():
 
 
 # ── looks_like_knowledge_need：决定"没查到"该不该说 ──────────────
+# ── 对话记忆 / 自我介绍：去画像，不去知识库 ─────────────────────
+def test_self_intro_skips_retrieval():
+    """「我叫小米」的去处是用户画像，库里不可能有答案；查库只会白跑一次。"""
+    d = _rule_classify("我叫小米")
+    assert d.need_knowledge is False, d
+    assert d.decision_source == "skip-自我介绍（存画像，不查库）", d.decision_source
+
+
+def test_memory_question_skips_retrieval():
+    """「记住了吗」带问号，但不是知识型提问 —— 2026-10-04 实测它被送去检索、
+    未命中后用户收到一句"知识库中没有查到相关内容"。"""
+    for msg in ["记住了吗", "我叫什么", "你还记得我刚才说的吗", "我们聊到哪了"]:
+        d = _rule_classify(msg)
+        assert d.need_knowledge is False, (msg, d)
+
+
+def test_memory_question_with_knowledge_keyword_still_retrieves():
+    """带知识关键词的照常检索：「帮我记住差旅报销标准」问的其实是制度内容。"""
+    d = _rule_classify("帮我记住差旅报销标准")
+    assert d.need_knowledge is True, d
+    d2 = _rule_classify("我记得年假是15天，对吗？")
+    assert d2.need_knowledge is True, d2
+
+
 def test_looks_like_knowledge_need():
     assert looks_like_knowledge_need("好的，发一下直属主管") is False
     assert looks_like_knowledge_need("帮我想个团队名") is False

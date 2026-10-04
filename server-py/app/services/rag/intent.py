@@ -99,6 +99,10 @@ def _skip_reason(msg: str) -> str | None:
             return label
     if _is_ack_continuation(msg):
         return "确认类会话延续"
+    if _is_conversation_meta(msg):
+        return "询问对话记忆"
+    if _is_self_intro(msg):
+        return "自我介绍（存画像，不查库）"
     return None
 
 
@@ -125,6 +129,33 @@ def _is_ack_continuation(msg: str) -> bool:
     if any(v in rest for v in _LOOKUP_VERBS):
         return False
     return True
+
+
+# 对话记忆 / 助手自身的元问题：「记住了吗」「我叫什么」「我们刚聊到哪」。
+# 这类问题的答案在**会话记忆与用户画像**里，不在公司文档里 —— 但它们带问号，
+# 靠"有没有疑问词"判不出来，必须单独列出来。否则 recall_first 会把它送去检索，
+# miss 之后用户收到的是一句"知识库中没有查到相关内容"（2026-10-04 实测：
+# 用户说完"我叫小米"再问"记住了吗"，得到的就是这句固定答复）。
+_META_PATTERNS = ("记住", "记得", "我叫什么", "我的名字", "我刚才说", "我说过什么",
+                  "我们聊", "聊到哪", "上文", "上一条", "你说过", "自我介绍", "你是谁")
+
+
+def _is_conversation_meta(msg: str) -> bool:
+    if not any(p in msg for p in _META_PATTERNS):
+        return False
+    # 带知识型关键词的照常检索（"帮我记住差旅报销标准"仍然要查库）
+    return not any(kw in msg for kw in _QUERY_KW)
+
+
+# 自我介绍这类陈述：「我叫小米」「我是技术部的，叫我小李」—— 它的去处是**用户画像**，
+# 库里不可能有答案；照常检索只会白跑一次，而且一旦 miss 还会把回答变成"没查到"。
+_SELF_INTRO = re.compile(r"^\s*(我叫|我是|我的名字是|我的名字叫|叫我|你可以叫我)")
+
+
+def _is_self_intro(msg: str) -> bool:
+    if not _SELF_INTRO.match(msg):
+        return False
+    return not any(kw in msg for kw in _QUERY_KW)
 
 
 def looks_like_knowledge_need(msg: str) -> bool:

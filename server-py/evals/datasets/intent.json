@@ -46,6 +46,20 @@
       "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的"
     },
     {
+      "id": "intent-014",
+      "message": "记住了吗",
+      "expect_need_knowledge": false,
+      "expect_source_prefix": "skip-",
+      "guard": "【对话记忆】2026-10-04 实测：用户先说\"我叫小米\"再说\"记住了吗\"，第二次被送去检索、未命中后收到固定答复\"知识库中没有查到相关内容\"。答案在会话记忆与用户画像里，不在公司文档里 —— 这类元问题带问号，靠疑问词判不出来，必须单独成规则"
+    },
+    {
+      "id": "intent-015",
+      "message": "我叫小米",
+      "expect_need_knowledge": false,
+      "expect_source_prefix": "skip-",
+      "guard": "【自我介绍】自我陈述的去处是用户画像（每轮结束后台抽取写入 user_profiles），检索它只会白跑一次 embedding + 重排。防的是\"什么话都先查一遍库\""
+    },
+    {
       "id": "intent-013",
       "message": "好的，发一下直属主管",
       "expect_need_knowledge": false,
