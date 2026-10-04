@@ -174,17 +174,28 @@ export default { components: { ProfileItem } }
 
 .row-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 
+/* 小号胶囊按钮：原来 width:100% 撑满整行、太抢眼（用户反馈"按钮那么大"）——
+   改成右下角一个紧凑的小按钮，平时低调，hover 才变危险色 */
 .btn-clear {
   margin-top: auto;
-  padding: 7px 0;
-  width: 100%;
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
   background: none;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 1.5;
   cursor: pointer;
   transition: all var(--transition);
+  opacity: .8;
 }
-.btn-clear:hover { border-color: var(--color-danger); color: var(--color-danger); }
+.btn-clear:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  opacity: 1;
+}
 </style>

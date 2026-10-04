@@ -213,11 +213,11 @@ export const useChatStore = defineStore('chat', () => {
           // 以前前端在这里自己累加 todaySpend，那份数字只活在当前浏览器标签里，
           // 一刷新就归零，和看板上的数字永远对不上。这里只负责稍后刷新看板。
           setTimeout(() => monitorStore.refresh(), 600)
-          // 刷新画像：服务端是**后台任务**在抽取画像（一次模型调用，约 1~2 秒），
-          // 在 done 的瞬间拉到的还是旧值 —— 必须延迟再拉
-          // （2026-10-04 实测：用户说完"我叫小米"，面板直到手动点刷新才出现姓名）
-          setTimeout(loadProfile, 1500)
-          setTimeout(loadProfile, 4000)
+          // 刷新画像：服务端是**后台任务**在抽取画像（一次模型调用，实测 0.7~2 秒），
+          // 在 done 的瞬间拉到的是旧值 —— 而且抽取耗时会波动，单次延时不可靠，
+          // 所以拉三次（1.2s / 3s / 6s），每次都是几百字节的 GET，代价可忽略。
+          // （2026-10-04 实测：用户说完"我叫小米"，面板一直等到手动点刷新才出现姓名）
+          ;[1200, 3000, 6000].forEach((ms) => setTimeout(loadProfile, ms))
         },
         onError: (err) => {
           aiMsg.streaming = false

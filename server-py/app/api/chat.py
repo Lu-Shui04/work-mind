@@ -238,6 +238,12 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                     await asyncio.sleep(0.002)
                 # 缓存命中的回答同样要进记忆，否则下一轮会"忘记"这次说过什么
                 await append_turn(session_id, message, text, user.tenant_id, user_id)
+                # 缓存命中也必须抽画像：命中的只是"这条回答"，而用户**这句话里关于他自己的信息
+                # 依然要进长期记忆**。2026-10-04 实测：说「我叫小米」若命中答案缓存，这一支
+                # 直接 return，画像永远不更新 —— 用户看到的是"我说了它却不记得"。
+                # 抽取是后台任务，不拖慢这条本该"秒回"的链路。
+                spawn(_safe_extract_profile(user_id, message, text, user.tenant_id),
+                      name="profile-extract-cached")
                 # 缓存命中也必须记账：这是看板"缓存命中率"的唯一数据来源
                 from app.api.monitor import record_api_call
                 record_api_call(
@@ -351,6 +357,10 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                         yield "token", {"token": text[i:i + 3]}
                         await asyncio.sleep(0.006)
                     await append_turn(session_id, message, text, user.tenant_id, user_id)
+                    # 这条固定答复没调模型，但用户这句话里可能带着自己的信息
+                    # （"我是技术部的，考勤怎么算"）—— 画像照抽，别让"没命中"把记忆也吞掉
+                    spawn(_safe_extract_profile(user_id, message, text, user.tenant_id),
+                          name="profile-extract-miss")
                     # 这条路没调模型（只回固定答复），但"为什么没查到"才是要看的东西 ——
                     # 检索那几步已经在 trace 里了，这里补一条结论
                     trace_step("response", "知识库未命中（不调用模型，只回一句引导）", detail={
