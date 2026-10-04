@@ -3,9 +3,19 @@
 #
 # 为什么不放在 ci.yml 里每次 push 都跑：
 #   它要真调模型、真灌文档 —— 有成本、依赖外部配额，而且几十分钟起步。
-#   放进每次 push 只会让人把红当成噪声。所以做成**手动触发 + 每晚一次**。
+#   放进每次 push 只会让人把红当成噪声。所以做成**纯手动触发**。
 #
-# 前置：仓库 Secrets 里配好 DEEPSEEK_API_KEY（必需）、ZHIPU_API_KEY（嵌入/备用模型必需）。
+# 为什么不再挂 schedule（2026-10 移除）：
+#   评测的价值在"改了东西之后知道有没有变差"，而这里唯一会变的就是仓库里的代码。
+#   代码不动时定时重跑，跑的是同一个 commit、同样的输入，结论必然一模一样 ——
+#   等于每晚定时花一次真金白银，买一个已知的答案。
+#   定时只适合"输入会自己变"的场景（外部数据源、上游模型漂移），本仓库不是。
+#   要跑就手动点 Run workflow；想让它自动化，也应该挂在 push 上（见文末说明）。
+#
+# 前置：仓库 Secrets 里配好 DEEPSEEK_API_KEY（必需）、ZHIPU_API_KEY（嵌入必需，见下）。
+#       注意 ZHIPU_API_KEY 不是"可选"：embeddings 走智谱 embedding-3（2048 维），
+#       缺了会掉到 OPENAI_API_KEY + SiliconFlow bge-m3（1024 维），与 PGVECTOR_DIM=2048
+#       不匹配，灌库阶段必然失败（ingest.py 有维度校验）。
 name: Evals
 
 on:
@@ -20,9 +30,11 @@ on:
         type: boolean
         required: false
         default: false
-  schedule:
-    # UTC 18:00 = 北京时间次日 02:00：挑空闲时段跑（DeepSeek 空闲价是高峰价的一半）
-    - cron: '0 18 * * *'
+  # 已移除 schedule：定时重跑同一份代码 = 定时花钱买已知结论。
+  # 若将来确实要自动化，用 push 触发 + 路径过滤更合理（只在评测相关代码变动时才跑），例如：
+  #   push:
+  #     branches: [py]
+  #     paths: ['server-py/app/**', 'server-py/evals/**', 'server-py/tests/**', 'scripts/run-evals.sh']
 
 # 只读权限：评测只需要读代码 + 上传 artifact
 permissions:
