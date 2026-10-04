@@ -79,7 +79,9 @@ services:
       - MEMORY_SUMMARY_AFTER_ROUNDS=${MEMORY_SUMMARY_AFTER_ROUNDS:-10}
       - MEMORY_KEEP_ROUNDS=${MEMORY_KEEP_ROUNDS:-10}
       # 意图识别策略：recall_first（默认，默认就查库）/ strict（旧的严格模式）
-      - RAG_INTENT_MODE=${RAG_INTENT_MODE:-recall_first}
+      # 意图判定：hybrid（默认，规则快速通道 + 知识信号直通 + 其余交给模型判"消息类别"）
+      # recall_first（纯规则）/ strict（旧的"规则+模型"）
+      - RAG_INTENT_MODE=${RAG_INTENT_MODE:-hybrid}
       # 重排：llm=用 DEEPSEEK_API_KEY 打分（默认）/ bge=专用 rerank 接口 / none=关闭
       - RERANK_PROVIDER=${RERANK_PROVIDER:-llm}
       - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}

@@ -2,23 +2,32 @@
 """
 意图识别：判断一条用户消息是否需要检索知识库，以及要检索什么。
 
-## 默认策略：召回优先（recall_first）
+## 三种模式（RAG_INTENT_MODE）
 
-旧策略是"规则先判 + 模型兜底"：只有出现问号/疑问词/领域关键词才去查库。实测的代价：
+### strict（历史模式，别再用来当默认）
+"规则先判 + 模型兜底"：只有出现问号/疑问词/领域关键词才查库。实测代价：
+- 用户输入「rag召回失败」，库里正好有那篇资料 → 规则判"不需要检索"，连模型都没问；
+- 就算交给模型兜底，模型也会说"这属于通用技术问答，无需检索公司内部文档" ——
+  **它根本不知道公司库里有什么**，却在凭常识判断"该不该查"。
 
-- 用户输入「rag召回失败」，而库里正好有一篇讲 RAG 的资料 → 规则判"不需要检索"，
-  连模型都没问，直接走通用问答。用户看到的就是"我问了它，它却不去查库"。
-- 就算交给模型兜底，模型也会说"这属于通用技术问答，无需检索公司内部文档"——
-  **它根本不知道公司库里有什么**，却在凭常识判断"该不该查"。在知识库产品里，
-  这个判断方向本身就是错的。
+### recall_first（纯规则，召回优先）
+只有在"明显与知识库无关"时才跳过（打招呼/客套/写作/日期/纯算式），其余一律查库。
+代价只是一次 embedding + 一次 SQL（几百毫秒，¥0.00006）。
+但它的短板在 2026-10-04 暴露得很清楚：**规则是个跑步机** —— 一个 session 里就得补
+三条（"好的，发一下直属主管" / "记住了吗" / "我叫小米"），每来一种新说法都要再加一条。
 
-结论：**"要不要查库"不该由常识判断，而应该默认去查。**
-- 库里没有相关内容 → 检索返回 0 条，代价只是一次 embedding + 一次本地 SQL（几百毫秒），
-  而且界面上会明确写出"为什么没命中"（reason=below_threshold / kb_empty）；
-- 库里正好有 → 用户拿到带引用的答案，这才是产品的价值。
+### hybrid（默认）
+分三层，各干各擅长的事：
+1. **规则快速通道**：打招呼/客套/纯算式/日期这类高置信、判错代价极低的 → 跳过检索（0 成本）；
+2. **知识信号直通**：消息里有制度关键词或"查/搜"动作 → 直接查库，**不问模型**
+   （省掉实测 ≈742ms / ¥0.0003 的那次调用）；
+3. **其余交给模型判"这条消息属于哪一类"**（chitchat/memory/self_intro/action/company/general）——
+   注意问的是**类别**，不是"该不该查库"：类别 → 是否检索由 _CATEGORY_POLICY 做确定性映射。
+   这样既拿到模型的泛化能力（"上次我们定的那个方案是什么来着"这种规则永远追不上的说法），
+   又不会让模型凭常识替我们决定"库里有没有"（那就是 strict 的老坑）。
+   三类结论一律当 company → 查库：模型超时/报错、返回了不认识的类别、拿不准。
 
-所以现在只有"明显与知识库无关"的消息才跳过检索：打招呼、客套话、自我介绍、
-讲笑话/写诗、纯算式。其余一律检索。要恢复旧的严格模式：RAG_INTENT_MODE=strict。
+  分类结果进程内缓存 1 小时（同一条消息第二次 0 成本）。
 
 ## 部门提示只是提示
 
@@ -32,11 +41,30 @@ import time
 
 from pydantic import BaseModel, Field
 
-from app.prompts.rag import INTENT_SYSTEM
+from app.prompts.rag import INTENT_CATEGORY_SYSTEM, INTENT_SYSTEM
 from app.infra.trace import trace_step
+from app.core.logger import logger
 
-# recall_first（默认，召回优先） / strict（旧的"规则+模型"判定）
-RAG_INTENT_MODE = (os.getenv("RAG_INTENT_MODE", "recall_first") or "recall_first").lower()
+# recall_first（纯规则，召回优先）
+# hybrid     （默认：规则快速通道 + 知识信号直通 + 其余交给模型判"消息类别"）
+# strict     （旧的"规则+模型"判定）
+RAG_INTENT_MODE = (os.getenv("RAG_INTENT_MODE", "hybrid") or "hybrid").lower()
+
+# 模型判出的类别 → 要不要查库。**这个映射是代码写死的**：
+# 模型只负责"这句话是哪一类"，"哪一类要查库"由这里决定 ——
+# 不让模型判"该不该查库"，因为它不知道公司库里有什么（见模块开头的历史坑）。
+_CATEGORY_POLICY: dict[str, bool] = {
+    "chitchat": False,     # 闲聊寒暄
+    "memory": False,       # 问对话记忆 / 助手自身
+    "self_intro": False,   # 自我介绍（存画像）
+    "action": True,        # 要执行动作 → 可能要先查制度
+    "company": True,       # 可能涉及公司内部资料
+    "general": True,       # 通用知识：也查（拿不准就查，召回优先的本意）
+}
+# 分类结果缓存：同一条消息第二次不再调模型（进程内即可，分类很便宜、也不怕各实例不一致）
+_CATEGORY_CACHE: dict[str, tuple[float, str, str]] = {}
+_CATEGORY_TTL = float(os.getenv("INTENT_CATEGORY_TTL", "3600"))
+_CATEGORY_CACHE_MAX = int(os.getenv("INTENT_CATEGORY_CACHE_MAX", "500"))
 
 # 领域关键词 → 部门线索（仅用于提示与解释，不做硬过滤）
 _DOMAIN_KEYWORDS: dict[str, list[str]] = {
@@ -71,8 +99,17 @@ class IntentDecision(BaseModel):
     query: str = Field(default="", description="用于检索的查询语句（可对原问题做改写）")
     department_hint: str | None = Field(default=None, description="推测的部门范围，如 hr/finance")
     rule_hit: list[str] = Field(default_factory=list, description="命中的规则关键词，便于审计")
-    decision_source: str = Field(default="recall-first", description="recall-first / skip-* / strict-* / forced")
+    decision_source: str = Field(default="recall-first", description="recall-first / skip-* / hybrid-* / strict-* / forced")
     reason: str = Field(default="", description="人话解释，随 SSE 下发到前端")
+    # hybrid 模式专用：模型判出的消息类别（chitchat/memory/...）与判定耗时，
+    # 都进全链路追踪 —— "这次为什么（没）查库"要能看到是哪一层做的决定
+    category: str | None = Field(default=None, description="hybrid：模型判出的消息类别")
+    classify_ms: int = Field(default=0, description="hybrid：模型分类耗时（0=走了规则快速通道/缓存）")
+
+
+class _MessageCategory(BaseModel):
+    category: str = Field(description="chitchat / memory / self_intro / action / company / general 之一")
+    reason: str = Field(default="", description="一句话依据")
 
 
 class _ModelIntent(BaseModel):
@@ -91,6 +128,103 @@ def _department_hint(msg: str) -> tuple[str | None, list[str]]:
             department = department or dept
     hits.extend([w for w in _GENERAL_KEYWORDS if w in msg])
     return department, hits
+
+
+def _has_knowledge_signal(msg: str) -> bool:
+    """消息里有没有"该查库"的强信号（知识型关键词 / 查、搜动作）。
+
+    有 → 直接查，**不花模型的钱**（这也是召回优先的本意）；
+    没有 → 才交给模型判类别（hybrid 模式）。
+    """
+    if any(kw in msg for kw in _QUERY_KW):
+        return True
+    return any(v in msg for v in _LOOKUP_VERBS)
+
+
+async def _model_category(msg: str) -> tuple[str, str, int, bool]:
+    """让模型判"这条消息属于哪一类"，返回 (类别, 依据, 耗时ms, 是否命中缓存)。
+
+    失败 / 超时 / 认不出的类别 → 一律当 company（查库）：
+    宁可多查一次库（¥0.00006、几百毫秒），也不能因为分类器挂了就漏答。
+    """
+    now = time.time()
+    hit = _CATEGORY_CACHE.get(msg)
+    if hit and now - hit[0] < _CATEGORY_TTL:
+        return hit[1], hit[2], 0, True
+
+    started = time.time()
+    try:
+        from app.models.llm import create_chat_model
+        model = create_chat_model(temperature=0, streaming=False)
+        result = await model.with_structured_output(
+            _MessageCategory, method="function_calling").ainvoke([
+                {"role": "system", "content": INTENT_CATEGORY_SYSTEM},
+                {"role": "user", "content": msg},
+            ])
+        category = (result.category or "").strip().lower()
+        reason = (result.reason or "").strip()[:120]
+        if category not in _CATEGORY_POLICY:
+            logger.warn("intent: 模型返回了未知类别，按 knowledge 处理",
+                        {"category": category[:40], "msg": msg[:40]})
+            category, reason = "company", f"类别不可识别（{category[:20]}），按召回优先处理"
+    except Exception as err:  # noqa: BLE001 - 分类失败绝不能拦住对话
+        logger.warn("intent: 消息分类失败，按召回优先处理", {"error": str(err)[:160]})
+        return "company", "分类失败，按召回优先处理", int((time.time() - started) * 1000), False
+
+    elapsed = int((time.time() - started) * 1000)
+    # 简单的容量控制：满了清一半（分类很便宜，重建代价可忽略）
+    if len(_CATEGORY_CACHE) >= _CATEGORY_CACHE_MAX:
+        for k in list(_CATEGORY_CACHE)[: _CATEGORY_CACHE_MAX // 2]:
+            _CATEGORY_CACHE.pop(k, None)
+    _CATEGORY_CACHE[msg] = (now, category, reason)
+    return category, reason, elapsed, False
+
+
+async def _hybrid_classify(message: str) -> IntentDecision:
+    """混合判定：规则快速通道 → 知识信号直通 → 其余交给模型判类别。
+
+    为什么要分三层（而不是直接让模型判"该不该查库"）：
+    模型不知道公司库里有什么，凭常识判"要不要检索"必然出错（见模块开头的历史坑）。
+    这里让模型只回答"这句话是哪一类"，类别 → 检索与否由 _CATEGORY_POLICY 映射 ——
+    泛化能力用上了，判断权还在代码手里。而"有知识关键词/查搜动作"的消息压根不问模型，
+    省掉那次调用（实测模型分类 ≈742ms / ¥0.0003）。
+    """
+    msg = message.strip()
+    department, hits = _department_hint(msg)
+
+    if not msg:
+        return IntentDecision(need_knowledge=False, query=msg,
+                              decision_source="skip-empty", reason="空消息")
+    if len(msg) <= 1:
+        return IntentDecision(need_knowledge=False, query=msg, rule_hit=hits,
+                              department_hint=department, decision_source="skip-too-short",
+                              reason="消息过短，没有可检索的内容")
+
+    # 第一层：高置信快速通道（零成本，判错代价极低）
+    skipped = _skip_reason(msg)
+    if skipped:
+        return IntentDecision(need_knowledge=False, query=msg, rule_hit=hits,
+                              department_hint=department, decision_source="skip-" + skipped,
+                              reason=f"识别为「{skipped}」，与知识库无关")
+
+    # 第二层：有知识信号 → 直接查，不问模型
+    if _has_knowledge_signal(msg):
+        return IntentDecision(
+            need_knowledge=True, query=msg, department_hint=department, rule_hit=hits,
+            decision_source="hybrid-signal",
+            reason="命中知识信号（制度关键词/查搜动作），直接检索知识库"
+                   + (f"；推断部门：{department}" if department else ""))
+
+    # 第三层：没有信号 → 模型判类别，拿不准就查（见 _CATEGORY_POLICY）
+    category, why, elapsed, cached = await _model_category(msg)
+    need = _CATEGORY_POLICY[category]
+    return IntentDecision(
+        need_knowledge=need, query=msg, department_hint=department, rule_hit=hits,
+        decision_source=f"hybrid-model-{category}", category=category, classify_ms=elapsed,
+        reason=(f"模型判定类别「{category}」"
+                + ("（命中缓存）" if cached else f"（耗时 {elapsed}ms）")
+                + f"：{why} → " + ("检索知识库" if need else "不需要查公司文档")),
+    )
 
 
 def _skip_reason(msg: str) -> str | None:
@@ -309,11 +443,17 @@ async def classify_intent(message: str) -> IntentDecision:
         "searchQuery": decision.query,
         "departmentHint": decision.department_hint,
         "ruleHit": decision.rule_hit,
+        # hybrid 专用：这次是规则快速通道 / 知识信号 / 还是模型判的类别（+耗时）
+        "mode": RAG_INTENT_MODE,
+        "category": decision.category,
+        "classifyMs": decision.classify_ms,
     })
     return decision
 
 
 async def _classify_intent(message: str) -> IntentDecision:
+    if RAG_INTENT_MODE == "hybrid":
+        return await _hybrid_classify(message)
     if RAG_INTENT_MODE == "strict":
         decision = _strict_classify(message)
         if decision.decision_source != "uncertain":

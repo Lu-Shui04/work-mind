@@ -1,6 +1,6 @@
 {
   "suite": "intent",
-  "description": "意图判定评测：POST /api/chat/stream 读 SSE 的 intent 事件，比对 needKnowledge 是否符合预期。防两类回归 ——「该查库却不查」和「闲聊也去查库」。默认策略是召回优先（RAG_INTENT_MODE=recall_first）：只有打招呼/客套话/自我介绍/闲聊创作/翻译润色/写作生成/日期天气/纯算式才跳过检索。",
+  "description": "意图判定评测：POST /api/chat/stream 读 SSE 的 intent 事件，比对 needKnowledge 是否符合预期。防三类回归 ——「该查库却不查」、「闲聊也去查库」、「拿不准时不查」。默认策略是 hybrid（RAG_INTENT_MODE=hybrid）：规则快速通道（打招呼/客套/写作/日期/算式/对话记忆/自我介绍）→ 知识信号直通（制度关键词/查搜动作，不问模型）→ 其余交给模型判消息类别，类别→是否检索由代码确定性映射，模型挂了/类别不认识一律当 company 查库。",
   "identity": "tech / internal",
   "cases": [
     {
@@ -35,15 +35,22 @@
       "id": "intent-010",
       "message": "公司的年假有多少天？",
       "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
+      "expect_source_prefix": "hybrid-",
       "guard": "最典型的该查库问题：防的是\"该查却不查\"，用户以为助手看了公司制度其实没看"
     },
     {
       "id": "intent-012",
       "message": "rag召回失败怎么办",
       "expect_need_knowledge": true,
-      "expect_source_prefix": "recall-first",
-      "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的"
+      "expect_source_prefix": "hybrid-",
+      "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料。hybrid 模式下它没有知识信号 → 交给模型判类别（实测判成 general）→ general 仍然要查库。**这条守的是\"分类权在代码手里\"**：如果哪天把策略映射改成\"听模型的\"，模型一句\"这属于通用技术问答\"就会把这条打回原形"
+    },
+    {
+      "id": "intent-016",
+      "message": "上次我们定的那个方案是什么来着？",
+      "expect_need_knowledge": false,
+      "expect_source_prefix": "hybrid-model-",
+      "guard": "【模型层的价值】这句既没有知识关键词、也不带任何规则能认出来的说法（\"方案/上次/来着\"都不在规则里），纯规则时代它会被当成知识提问去查库、miss 之后回一句\"知识库没有查到\"。hybrid 让模型判类别 → memory → 不查库。这类\"没见过的说法\"正是模型该干的活，也是规则跑步机的终点"
     },
     {
       "id": "intent-014",
