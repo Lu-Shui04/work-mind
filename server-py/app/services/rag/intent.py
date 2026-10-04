@@ -53,7 +53,7 @@ _QUESTION_MARKERS = ["吗", "?", "？", "什么", "如何", "怎么", "多少", 
 # 明确"不需要查库"的信号 —— 只有命中这些才跳过检索
 _SKIP_RULES: list[tuple[str, str]] = [
     (r"^\s*(你好|您好|hi|hello|嗨|哈喽|在吗|早上好|下午好|晚上好|早|晚安)[!！。~～\s]*$", "打招呼"),
-    (r"^\s*(谢谢|多谢|感谢|好的|好嘞|ok|OK|收到|明白了|知道了|再见|拜拜|晚安)[!！。~～\s]*$", "客套话"),
+    (r"^\s*(谢谢|多谢|感谢|好的|好嘞|好|行|可以|嗯|对|是的|没错|ok|OK|收到|明白了|知道了|再见|拜拜|晚安)[!！。~～\s]*$", "客套话"),
     (r"(你是谁|你叫什么|你能做什么|你会什么|介绍一下你自己|自我介绍)", "询问助手本身"),
     (r"(讲个笑话|讲个故事|写一首诗|写首诗|写首词|编个故事|来个段子)", "闲聊创作"),
     (r"^\s*(帮我)?(翻译|润色|改写|缩写|扩写)(一下)?", "纯语言任务"),
@@ -97,7 +97,126 @@ def _skip_reason(msg: str) -> str | None:
     for pattern, label in _SKIP_RULES:
         if re.search(pattern, msg):
             return label
+    if _is_ack_continuation(msg):
+        return "确认类会话延续"
     return None
+
+
+# 确认/同意开头的会话延续：「好的，发一下直属主管」「行，就按 600 一晚算」。
+# 这类消息是在回应上一轮、没有新的知识诉求 —— 照 recall_first 检索只会白白 miss 一次，
+# 回答还会被强制带上「知识库中没有查到相关内容」（2026-10-04 实测，用户困惑
+# "为什么每一句都要检索"）。留三个"还是要查"的口子：后半句还有知识型关键词 /
+# 疑问词 / 明确的查、搜动作（「好的，帮我查一下年假政策」必须照常检索）。
+_ACK_LEAD = re.compile(
+    r"^(?:好的|好嘞|好|行|可以|嗯|OK|ok|收到|明白|明白了|知道了|对|是的|没错)"
+    r"[，,。.！!~～\s、]+(.+)$")
+_LOOKUP_VERBS = ("查", "搜", "检索", "帮我查", "查一下", "看一下")
+
+
+def _is_ack_continuation(msg: str) -> bool:
+    m = _ACK_LEAD.match(msg)
+    if not m:
+        return False
+    rest = m.group(1)
+    if any(kw in rest for kw in _QUERY_KW):
+        return False
+    if any(mk in rest for mk in _QUESTION_MARKERS):
+        return False
+    if any(v in rest for v in _LOOKUP_VERBS):
+        return False
+    return True
+
+
+def looks_like_knowledge_need(msg: str) -> bool:
+    """消息是否带着知识诉求 —— 决定"没查到"这句声明该不该说。
+
+    与"要不要检索"是两回事：recall_first 对很多非知识消息也照常检索（例行成本，
+    见模块开头），但检索 miss 后**不该**拿「知识库中没有查到相关内容」去开场/拒答 ——
+    「好的，发一下直属主管」这类会话延续被硬塞一句"没查到"只会让用户困惑。
+    有知识型关键词 / 疑问词 / 明确的查、搜动作，才算知识诉求。
+    """
+    if any(kw in msg for kw in _QUERY_KW):
+        return True
+    if any(mk in msg for mk in _QUESTION_MARKERS):
+        return True
+    if any(v in msg for v in _LOOKUP_VERBS):
+        return True
+    return False
+
+
+# ── 检索式改写：动作请求 → 名词短语检索式 ─────────────────────────────
+# 为什么必须改：cross-encoder 重排模型（bge-reranker 等）是按「问句-答案段」训练的，
+# 对「帮我报销一下」这类祈使/动作请求几乎没有判别力 —— 实测同一批候选：
+#   查询「帮我把2000元的住宿费报销一下，给领导通知一下」→《差旅与报销管理制度》
+#   的住宿费标准切片只得 0.20，而查询「住宿费报销」→ 同一片 0.97。
+# 向量召回对两种说法都稳（0.53 照样把制度文档召回来），于是坏链是：
+#   「重排全判死 → rerank_rejected → 对外说知识库没查到」——制度明明就在库里。
+# 所以检索前先把动作请求改写成检索式（问句原样返回），规则全部确定性、零模型调用
+# （recall_first 模式的成本承诺不变）。应用位置在 rag/query.py 的检索入口，
+# 因此对话 / 知识库检索页 / Agent 预检索 / read_doc 工具四条链路全部生效。
+
+# 触发条件（保守）：带祈使前缀（帮我/请/麻烦/我想…）或带「一下」；
+# 纯问句（"年假有多少天？"）不触发，原样返回 —— 评测集里的问句式用例不受影响。
+_QUERY_LEAD = re.compile(
+    r"^(?:我想了解一下|我想了解|请帮我|帮我|请你|麻烦你|麻烦|请|烦请|"
+    r"替我|给我|帮忙|我想|我要)\s*")
+# 只删「动作动词」开头（查/看/搜/找/算/讲…）。单个"查"字会不会误删复合词？
+# "调查/审查"是"调/审"打头、不受影响；"查看"配"查"删掉后剩"看…"仍可检索。
+_QUERY_VERBS = re.compile(
+    r"^(?:查一下|查查|查看|看一下|看看|看下|搜一下|搜搜|搜索|找一下|找找|"
+    r"算一下|算算|确认一下|了解一下|了解|介绍一下|介绍|讲一下|讲讲|"
+    r"说一下|说说|解释一下|查|看|搜|找|算|讲)\s*")
+_QUERY_TAIL = re.compile(r"[。！!？?\s]*$")
+# 金额数字（5000元/2000块…）：cross-encoder 拿"2000"对不上制度表里的"600/450/350"，
+# 反而压低分数（实测 0.97 → 0.63），而金额本来就在用户原话里、回答时模型看得到，删掉无损。
+_QUERY_AMOUNT = re.compile(r"\d+(?:\.\d+)?\s*(?:元|块|万|千|百)\s*的?")
+# 指代词/所有格：不影响检索主题，纯稀释信号。分两档：
+# - 子句开头剥「该」（"该"在词中间会误伤"应该"，所以只锚定开头）
+# - 指示词/所有格（这笔/这些/这个/我的/公司的…）随处可剥：它们不可能成为检索主题
+_QUERY_DEMO_HEAD = re.compile(r"^该\s*")
+_QUERY_DEMO_ANY = re.compile(
+    r"(?:这笔|这些|这个|那个|本次|这次|我们的|咱们的|我的|公司的|部门的)\s*")
+
+# 哪些子句值得进检索式：含知识型关键词的子句。动作子句（"给领导通知一下"）不含
+# 关键词，会被丢掉 —— 通知是工具活，不是知识库的检索对象。
+_QUERY_KW = [w for words in _DOMAIN_KEYWORDS.values() for w in words] + _GENERAL_KEYWORDS
+
+
+def build_search_query(message: str) -> str:
+    """把动作请求改写成检索式；问句原样返回。幂等：结果不会再触发改写。"""
+    msg = (message or "").strip()
+    if not msg or len(msg) <= 1:
+        return msg
+
+    # 触发条件：祈使前缀 或 「一下」。纯问句不触发（这是防回归的关键）。
+    if not _QUERY_LEAD.match(msg) and "一下" not in msg:
+        return msg
+
+    text = msg.replace("一下", "")
+    # 祈使脚手架可能叠着（"请帮我查…"），循环剥到剥不动为止
+    for _ in range(3):
+        stripped = _QUERY_LEAD.sub("", text).strip()
+        if stripped == text:
+            break
+        text = stripped
+    text = re.sub(r"^把\s*", "", text)
+    text = _QUERY_VERBS.sub("", text).strip()
+
+    # 拆子句：只要「含知识型关键词」的子句；一个都没有就全保留（别把信息丢光）
+    clauses = [c.strip() for c in re.split(r"[，,；;。\s]+", text) if c.strip()]
+    if any(any(kw in c for kw in _QUERY_KW) for c in clauses):
+        clauses = [c for c in clauses if any(kw in c for kw in _QUERY_KW)]
+
+    parts = []
+    for c in clauses:
+        c = _QUERY_DEMO_HEAD.sub("", c).strip()
+        c = _QUERY_DEMO_ANY.sub("", c).strip()
+        c = _QUERY_AMOUNT.sub("", c).strip()
+        c = _QUERY_TAIL.sub("", c).strip()
+        if c:
+            parts.append(c)
+    result = " ".join(parts).strip()
+    return result or msg
 
 
 def _rule_classify(message: str) -> IntentDecision:

@@ -258,6 +258,8 @@ async def read_doc_tool(question: str) -> str:
 
         user = get_current_user()
         docs, recall = await retrieve_with_meta(question, user, k=6, filters=SearchFilters())
+        # 命中切片回传给上层 → 前端「引用来源」面板（Agent 页也能看到引了哪几份文档）
+        record_tool_sources(docs, recall)
 
         if not docs:
             # 把"为什么没找到"如实带回去（库空 / 被权限过滤 / 分数低于阈值 / 重排判定答不了），
@@ -541,6 +543,38 @@ def reset_tool_call_log(token) -> None:
         _tool_call_log.reset(token)
     except ValueError:
         pass
+
+
+# 工具里检索到的引用来源：read_doc 是"工具内部的检索"，命中切片也必须能像知识分支那样
+# 出现在前端「引用来源」里 —— 否则 Agent 页只有一团工具返回文本，用户根本不知道答案
+# 引了哪份文档（2026-10-04 用户反馈："为什么 Agent 模块不显示文档检索来源"）。
+# 与 _tool_call_log 同一套路：**父任务放一个可变列表，工具往里 append**。
+# （ContextVar 在子上下文里只复制引用，重新赋值父任务看不到，改内容才看得到。）
+_tool_sources: ContextVar[list | None] = ContextVar("workmind_tool_sources", default=None)
+
+
+def set_tool_sources(bucket: list | None):
+    """开始一次任务时调用；返回 token 供 reset 用。"""
+    return _tool_sources.set(bucket)
+
+
+def reset_tool_sources(token) -> None:
+    try:
+        _tool_sources.reset(token)
+    except ValueError:
+        pass
+
+
+def record_tool_sources(sources: list, recall: dict | None = None) -> None:
+    """工具里查到（或没查到）时调用，由上层取走并发 sources 事件。
+
+    没查到也要记：前端靠它显示"为什么没命中"（库空/权限过滤/低于阈值/重排全弃），
+    而不是让用户对着"工具返回了一句话"猜原因。
+    """
+    bucket = _tool_sources.get()
+    if bucket is None:
+        return
+    bucket.append({"sources": list(sources or []), "recall": dict(recall or {})})
 
 
 # 不重试的工具：**有副作用的调用重试等于重复执行**。

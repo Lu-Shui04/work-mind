@@ -44,6 +44,13 @@
       "expect_need_knowledge": true,
       "expect_source_prefix": "recall-first",
       "guard": "README 记录的历史回归：这句没有疑问词、也不含制度关键词，旧规则判\"不需要检索\"，而库里正好有相关技术资料 —— 召回优先策略就是为它改的"
+    },
+    {
+      "id": "intent-013",
+      "message": "好的，发一下直属主管",
+      "expect_need_knowledge": false,
+      "expect_source_prefix": "skip-",
+      "guard": "【确认类会话延续】2026-10-04 实测：多轮对话里用户回一句\"好的，发一下直属主管\"，recall_first 照常检索、miss 后回答还被强制带上\"知识库中没有查到相关内容\"，用户困惑\"为什么每一句都要检索\"。确认词开头且后半句没有知识诉求的消息必须跳过检索；\"好的，帮我查一下年假政策\"仍要照常检索"
     }
   ]
 }

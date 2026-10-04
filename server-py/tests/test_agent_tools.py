@@ -135,6 +135,48 @@ def test_read_doc_returns_hits_with_citation_meta():
         Q.retrieve_with_meta = original
 
 
+def test_read_doc_records_sources_for_the_agent_sources_event():
+    """工具里的检索结果要能被上层取走 —— Agent 页的「引用来源」面板靠它点亮。
+
+    2026-10-04 用户反馈："为什么 Agent 模块不显示文档检索来源"：走工具分支时
+    只有 tool_result 卡片，命中切片从没下发过 sources 事件（只有知识分支发）。
+    """
+    async def fake(question, user, k=None, filters=None):
+        return [{"title": "年假与休假政策", "pageNumber": 1, "department": "general",
+                 "version": "2026-09", "content": "满 1 年不满 10 年，年假 5 天。"}], {"reason": "ok"}
+
+    bucket: list = []
+    token = T.set_tool_sources(bucket)
+    original, Q = _patch_retrieve(fake)
+    try:
+        _run(T.read_doc_tool.ainvoke({"question": "年假"}))
+    finally:
+        Q.retrieve_with_meta = original
+        T.reset_tool_sources(token)
+
+    assert len(bucket) == 1, bucket
+    assert bucket[0]["sources"][0]["title"] == "年假与休假政策", bucket
+    assert bucket[0]["recall"]["reason"] == "ok", bucket
+
+
+def test_read_doc_records_sources_even_when_nothing_found():
+    """没命中也要记：前端靠它显示"为什么没命中"，而不是让用户对着工具返回猜原因。"""
+    async def fake(question, user, k=None, filters=None):
+        return [], {"reason": "rerank_rejected", "explain": "重排判定全部答不了"}
+
+    bucket: list = []
+    token = T.set_tool_sources(bucket)
+    original, Q = _patch_retrieve(fake)
+    try:
+        _run(T.read_doc_tool.ainvoke({"question": "年会安排"}))
+    finally:
+        Q.retrieve_with_meta = original
+        T.reset_tool_sources(token)
+
+    assert len(bucket) == 1 and bucket[0]["sources"] == [], bucket
+    assert bucket[0]["recall"]["reason"] == "rerank_rejected", bucket
+
+
 def test_repeat_guard_skips_identical_calls():
     """模型换关键词反复搜同一件事时，第二次起不再真正执行（省步数、省搜索费用）。"""
     token = T.set_tool_call_log({})

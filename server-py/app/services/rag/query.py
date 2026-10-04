@@ -26,6 +26,7 @@ from app.core.identity import SqlParams, User, can_view, doc_visibility_sql, ver
 from app.models import pricing
 from app.models.llm import embeddings, embeddings_tier_name
 from app.services.rag import rerank
+from app.services.rag.intent import build_search_query
 from app.services.rag.registry import registry
 from app.services.rag.vectorstore import get_vector_store
 from app.infra.trace import trace_step
@@ -183,6 +184,19 @@ async def _retrieve_with_meta(question: str, user: User, k: int | None = None,
     """检索并返回 (命中切片, 诊断信息)。诊断信息用于回答"为什么没命中"。"""
     filters = filters or SearchFilters()
     k = k or DEFAULT_TOP_K
+    # 检索式改写：动作请求（"帮我报销一下…"）→ 名词短语检索式（"住宿费报销"）。
+    # 为什么在这改而不是只改意图层：read_doc 工具 / 知识库检索页等入口**不经意图层**，
+    # 直接把原话当检索词传进来 —— 重排（cross-encoder 对祈使句没判别力）会把
+    # 真命中的制度切片全判死（rerank_rejected），对外变成"知识库没查到"。
+    # 改在检索唯一入口，四条链路（对话/检索页/Agent 预检索/read_doc）一次生效；
+    # 改写本身幂等，问句原样返回。详见 intent.py::build_search_query。
+    search_query = build_search_query(question)
+    if search_query != question:
+        trace_step("rewrite", "检索式改写", detail={
+            "from": question[:300], "to": search_query[:300],
+        })
+        logger.info("rag: query rewritten", {"from": question[:40], "to": search_query[:40]})
+    question = search_query
     if not embeddings:
         raise ValueError("未配置 ZHIPU_API_KEY / OPENAI_API_KEY，无法使用知识库检索")
 

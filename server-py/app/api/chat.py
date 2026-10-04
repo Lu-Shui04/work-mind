@@ -18,7 +18,7 @@ from app.core.db import StorageUnavailable
 from app.core.identity import User, current_user
 from app.models import pricing
 from app.models.llm import chat_model
-from app.services.rag.intent import classify_intent
+from app.services.rag.intent import classify_intent, looks_like_knowledge_need
 from app.services.rag.query import (
     SearchFilters, build_turn_context, miss_reply, resolve_knowledge_mode,
     retrieve_with_meta,
@@ -314,13 +314,17 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                               "departmentHintMatched": False,
                               "appliedFilters": filters.describe()}
 
-                yield "sources", {
-                    "sources": sources,
-                    "recall": recall,
-                    "filters": filters.describe(),
-                    "identity": {"userId": user.user_id, "departments": user.departments,
-                                 "clearance": user.clearance},
-                }
+                # 只有「命中资料」或「知识型消息的未命中」才推这个块：
+                # 确认/续聊类消息 miss 了不该弹"知识库未命中"提示框（与 Agent 同一条规则，
+                # 2026-10-04 实测：用户说"好的，发一下直属主管"却看到召回诊断，很困惑）
+                if sources or body.useKnowledge is True or looks_like_knowledge_need(message):
+                    yield "sources", {
+                        "sources": sources,
+                        "recall": recall,
+                        "filters": filters.describe(),
+                        "identity": {"userId": user.user_id, "departments": user.departments,
+                                     "clearance": user.clearance},
+                    }
 
                 # ── 没命中时怎么办：回一句引导，**不调用模型** ──────────────
                 # 三种模式的语义（唯一裁决处是 resolve_knowledge_mode）：
@@ -330,6 +334,11 @@ async def chat_stream(body: ChatStreamRequest, user: User = Depends(current_user
                 # 为什么不再让模型作答：没有依据就不让它发挥 —— 省一次调用，
                 # 也不会再把通用常识写成公司规定（详见 query.py 里 miss_reply 的注释）。
                 mode = resolve_knowledge_mode(body.useKnowledge, need, sources)
+                if (mode == "miss" and body.useKnowledge is not True
+                        and not looks_like_knowledge_need(message)):
+                    # 消息不是知识型提问（确认/续聊/起名这类）：recall_first 例行检索 miss 了，
+                    # 不要把会话堵死在"知识库没查到"的固定答复上，正常交给模型回答
+                    mode = "no_retrieval"
                 if mode == "miss":
                     text = miss_reply()
                     yield "start", {"sessionId": session_id, "runId": trace.run_id}

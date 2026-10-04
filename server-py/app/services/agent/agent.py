@@ -24,14 +24,15 @@ from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
 from app.services.agent.tools import (
-    all_tools, guarded_tools, reset_tool_call_log, set_tool_call_log,
+    all_tools, guarded_tools, reset_tool_call_log, reset_tool_sources,
+    set_tool_call_log, set_tool_sources,
 )
 from app.services.chat.memory import append_turn, memory_block
 from app.core.db import StorageUnavailable
 from app.core.identity import User, get_current_user, reset_current_user, set_current_user
 from app.models import pricing
 from app.models.llm import create_chat_model, primary_model_name
-from app.services.rag.intent import classify_intent
+from app.services.rag.intent import classify_intent, looks_like_knowledge_need
 from app.infra.trace import trace_step
 from app.services.rag.query import SearchFilters, build_context, retrieve_with_meta
 from app.prompts.chat import MISS_FIRST_RULE, miss_notice as miss_notice_text, miss_reply
@@ -144,7 +145,7 @@ _tool_node = ToolNode(guarded_tools)
 _TOOL_CAPABILITY_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("计算", ("算一下", "帮我算", "计算一下", "等于多少", "还剩多少", "还剩几",
               "已用", "扣除", "合计", "总计", "换算成", "乘以", "除以")),
-    ("发送通知", ("通知", "发给", "发送给", "提醒", "告知")),
+    ("发送通知", ("通知", "发给", "发送给", "发一下", "发下", "发送", "发到", "推送", "提醒", "告知")),
     ("生成报告", ("生成报告", "写一份报告", "出一份", "生成一份", "整理成报告",
                   "写周报", "会议纪要")),
 )
@@ -426,6 +427,15 @@ async def run_agent(task: str, on_event, user: User | None = None,
     token = set_current_user(user or User())
     # 重复调用防护：同一个"工具+参数"在本次任务里只真正执行一次，见 tools.py 的 _repeat_guard
     log_token = set_tool_call_log({})
+    # 工具检索到的引用来源（read_doc）：与 _tool_call_log 同一套路 —— 父任务放一个
+    # 可变列表，工具往里 append，这里取走并发 sources 事件（见 tools.record_tool_sources）
+    tool_sources: list = []
+    sources_token = set_tool_sources(tool_sources)
+    # 前端对 sources 事件是"替换"语义，所以这里累计去重后再下发：
+    # 一次任务里 read_doc 可能被调用多次（换个关键词再查一轮），
+    # 只发最后一次的话，引用来源面板会丢掉前面查到的文档
+    emitted_sources: list = []
+    emitted_keys: set = set()
     # 会话记忆：上次任务说过什么，这次要记得（摘要 + 最近 N 轮）
     _user = user or User()
     memory = await memory_block(session_id, _user.tenant_id)
@@ -524,8 +534,13 @@ async def run_agent(task: str, on_event, user: User | None = None,
             # 用户明确关掉了知识库时，模型也不许再选 knowledge（否则等于没关掉）
             route = "chat" if decision.route == "knowledge" else decision.route
             if need:
-                why = (pre_recall or {}).get("explain") or "没有可用内容"
-                route_reason = f"已按召回优先检索知识库：{why} → {decision.reason}"
+                if looks_like_knowledge_need(task):
+                    why = (pre_recall or {}).get("explain") or "没有可用内容"
+                    route_reason = f"已按召回优先检索知识库：{why} → {decision.reason}"
+                else:
+                    # 不是知识型消息（确认/续聊/起名这类）：检索 miss 是 recall_first 的
+                    # 例行成本，别把"召回 N 条候选但重排…"的诊断写进用户看到的路由说明
+                    route_reason = f"{intent_reason} → {decision.reason}"
             else:
                 route_reason = f"{intent_reason} → {decision.reason}"
             # 同上：任务要求"计算/通知/报告"这类知识分支做不到的能力时，硬性走工具分支
@@ -535,7 +550,9 @@ async def run_agent(task: str, on_event, user: User | None = None,
                 route_reason += f"；任务需要「{capability}」，强制走工具分支"
             search_query = decision.search_query or task
             # 知识分支不会执行，这里把检索诊断直接推给前端（否则用户不知道为什么没走知识库）
-            if need:
+            # 但只在"消息确实带着知识诉求"时才推：确认/续聊类消息被塞一个
+            # "知识库未命中"提示框，只会让用户困惑"为什么每句都检索"（2026-10-04 实测）
+            if need and looks_like_knowledge_need(task):
                 await on_event("sources", {"sources": [], "from": "agent-precheck",
                                             "recall": pre_recall})
             # 没命中就走别的分支，别让预检索结果影响后面的节点
@@ -546,6 +563,11 @@ async def run_agent(task: str, on_event, user: User | None = None,
         # ⚠️ 必须在下面 trace_step / intent 事件之前算出来 —— 之前把它放在后面，
         #    结果 tracer 里引用它直接 UnboundLocalError，整个 Agent 任务当场挂掉。
         kb_missed = bool(need) and not pre_hit and not forced_miss
+        if kb_missed and not looks_like_knowledge_need(task):
+            # 消息本来就不是在问知识库：recall_first 的例行检索 miss 了，也不该用
+            # "知识库中没有查到相关内容"开场（同一次实测：用户让"发一下直属主管"，
+            # 回答却被强制带上知识库未命中声明，读起来自相矛盾）
+            kb_missed = False
         miss_text = miss_notice_text() if kb_missed else ""
 
         await on_event("intent", {
@@ -636,6 +658,21 @@ async def run_agent(task: str, on_event, user: User | None = None,
                     "toolName": name, "result": result,
                     "resultText": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                 })
+                # read_doc 命中（或没命中）的切片也要下发 sources：Agent 页的「引用来源」
+                # 面板以前只有知识分支会亮，走工具分支时用户看不到答案引了哪几份文档
+                # （2026-10-04 用户反馈）。FIFO 取：并发调工具时与调用顺序一致。
+                if name == "read_doc" and tool_sources:
+                    latest = tool_sources.pop(0)
+                    for s in latest.get("sources") or []:
+                        key = s.get("chunkId") or (s.get("docId"), s.get("pageNumber"),
+                                                  (s.get("content") or "")[:40])
+                        if key not in emitted_keys:
+                            emitted_keys.add(key)
+                            emitted_sources.append(s)
+                    await on_event("sources", {
+                        "sources": emitted_sources, "from": "read_doc",
+                        "recall": latest.get("recall") or {},
+                    })
 
             # 每次模型调用开始时换一个干净的过滤器（一次调用内命中标记后就不再输出）
             if event_type == "on_chat_model_start":
@@ -744,6 +781,7 @@ async def run_agent(task: str, on_event, user: User | None = None,
         await on_event("error", {"message": message or "Agent 执行出错"})
     finally:
         reset_tool_call_log(log_token)
+        reset_tool_sources(sources_token)
         reset_current_user(token)
 
 
