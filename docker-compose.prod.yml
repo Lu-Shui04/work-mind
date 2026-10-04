@@ -1,0 +1,130 @@
+# docker-compose.prod.yml
+# 服务器部署用（与本地开发的 docker-compose.yml 分开，互不影响）：
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# 与 docker-compose.yml 的三点区别，都是为了"公网服务器"这个场景：
+#   1. 只对外暴露前端一个端口 8053（nginx 里已把 /api 反代到后端），
+#      后端 3000 / PostgreSQL / Redis 一律不发布到宿主机 —— 少一个端口就少一个攻击面；
+#      另外宿主机 3000 已被别的容器（127.0.0.1:3000）占用，发布必然冲突。
+#   2. 数据库与 Redis 只走 compose 内部网络（服务名 db / redis 即主机名）。
+#   3. 容器名与数据卷统一带 workmind 前缀，和宿主机上其它应用（docrag / jwxt / jisu-ai）不打架。
+#
+# 访问：http://<服务器IP>:8053
+
+name: workmind
+
+services:
+  # ── 应用数据库（PostgreSQL 17 + pgvector）──────────────────────
+  # 知识库（documents/chunks + 向量）和会话记忆都在这里，容器重建不丢。
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: workmind-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-workmind}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-workmind}
+      POSTGRES_DB: ${PG_DATABASE:-workmind}
+    volumes:
+      - workmind-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-workmind} -d ${PG_DATABASE:-workmind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── 答案缓存（Redis）───────────────────────────────────────────
+  # L2 缓存；连不上自动降级为纯 L1，不影响可用性。
+  redis:
+    image: redis:7-alpine
+    container_name: workmind-redis
+    restart: unless-stopped
+    command: >
+      redis-server --save "" --appendonly no
+      --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── 后端服务（Python / FastAPI）─────────────────────────────
+  server:
+    build:
+      context: ./server-py
+      dockerfile: Dockerfile
+      args:
+        # 默认走腾讯云内网镜像（本机实测 150KB/0.12s；直连 pypi.org 只有约 20KB/s，
+        # 装完这些依赖要 20 分钟以上）。注意该镜像**只能在腾讯云内网访问**，
+        # 换到阿里云/海外机器时请在 .env 里覆盖，例如：
+        #   PIP_INDEX_URL=https://pypi.org/simple
+        #   PIP_TRUSTED_HOST=              # https 源不需要这行
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://mirrors.tencentyun.com/pypi/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.tencentyun.com}
+    container_name: workmind-server
+    restart: unless-stopped
+    expose:
+      - "3000"                             # 只在 compose 网络内可达，不发布到宿主机
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - ZHIPU_API_KEY=${ZHIPU_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # 前后端同源（都走 8053），CORS 其实用不上；列出来是防止以后单独直连后端
+      - ALLOWED_ORIGINS=http://localhost:5173,http://139.199.4.231:8053,http://139.199.4.231
+      - DATABASE_URL=postgresql://${PG_USER:-workmind}:${PG_PASSWORD:-workmind}@db:5432/${PG_DATABASE:-workmind}
+      - PGVECTOR_DIM=2048
+      - RAG_SIMILARITY_THRESHOLD=${RAG_SIMILARITY_THRESHOLD:-0.35}
+      - RAG_TOP_K=${RAG_TOP_K:-6}
+      - MEMORY_SUMMARY_AFTER_ROUNDS=${MEMORY_SUMMARY_AFTER_ROUNDS:-10}
+      - MEMORY_KEEP_ROUNDS=${MEMORY_KEEP_ROUNDS:-10}
+      - RAG_INTENT_MODE=${RAG_INTENT_MODE:-recall_first}
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-llm}
+      - RERANK_MODEL=${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANK_BASE_URL=${RERANK_BASE_URL:-https://api.siliconflow.cn/v1}
+      - RERANK_API_KEY=${RERANK_API_KEY:-}
+      - RERANK_POOL_MULT=${RERANK_POOL_MULT:-3}
+      - RERANK_MAX_CANDIDATES=${RERANK_MAX_CANDIDATES:-12}
+      - RERANK_MAX_CHARS=${RERANK_MAX_CHARS:-600}
+      - RAG_RERANK_MIN_SCORE=${RAG_RERANK_MIN_SCORE:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - BOCHA_API_KEY=${BOCHA_API_KEY:-}
+      - SEARCH_PROVIDER=${SEARCH_PROVIDER:-auto}
+      - SEARCH_MAX_RESULTS=${SEARCH_MAX_RESULTS:-5}
+      - ZHIPU_SEARCH_ENGINE=${ZHIPU_SEARCH_ENGINE:-search_std}
+      - AGENT_MAX_STEPS=${AGENT_MAX_STEPS:-14}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-30}
+      - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
+      - LLM_RETRY_BASE_DELAY=${LLM_RETRY_BASE_DELAY:-0.5}
+      - LLM_RETRY_MAX_DELAY=${LLM_RETRY_MAX_DELAY:-8}
+      - TOOL_TIMEOUT=${TOOL_TIMEOUT:-20}
+      - TOOL_MAX_RETRIES=${TOOL_MAX_RETRIES:-1}
+      - BREAKER_FAIL_THRESHOLD=${BREAKER_FAIL_THRESHOLD:-5}
+      - BREAKER_RECOVERY_SECONDS=${BREAKER_RECOVERY_SECONDS:-30}
+      - MODEL_FALLBACK=${MODEL_FALLBACK:-auto}
+      - FALLBACK_MODEL=${FALLBACK_MODEL:-glm-4-flash}
+      - FALLBACK_BASE_URL=${FALLBACK_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./server-py/uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # ── 前端服务（Vue3 / Vite 构建 + Nginx 托管）───────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: workmind-frontend
+    restart: unless-stopped
+    ports:
+      - "8053:80"                          # 唯一对外端口：http://<服务器IP>:8053
+    depends_on:
+      - server
+
+volumes:
+  workmind-pgdata:

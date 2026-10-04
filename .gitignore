@@ -33,3 +33,7 @@ server-py/uploads/*
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# 工具链的会话/钩子状态（DSH/mimosa 自动生成，不属于项目代码）
+.mimosa/
+**/.mimosa/
